@@ -1,0 +1,58 @@
+# Python bytecode and interpreter caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments and local environment managers
+.venv/
+venv/
+env/
+ENV/
+.direnv/
+
+# Local secrets and environment overrides
+.env
+.env.*
+!.env.example
+
+# Packaging and build output
+build/
+dist/
+.eggs/
+*.egg-info/
+pip-wheel-metadata/
+
+# Test, coverage, type-checker, and linter caches
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.mypy_cache/
+.pyright/
+.ruff_cache/
+.tox/
+.nox/
+
+# Editor and IDE state
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs and crash leftovers
+*.log
+.*.tmp
+
+# Transient files in the committed default experiment workspace.
+# Do not ignore run/ itself: the completed run is a versioned research artifact.
+/run/.lock
+/run/state/run.sqlite3-wal
+/run/state/run.sqlite3-shm
+/run/state/run.sqlite3-journal

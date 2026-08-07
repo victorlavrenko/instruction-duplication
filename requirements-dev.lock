@@ -1,0 +1,8 @@
+# Exact direct developer-tool versions validated by the CI configuration.
+build==1.5.0
+coverage[toml]==7.15.3
+mypy==2.3.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pyright==1.1.411
+ruff==0.16.1

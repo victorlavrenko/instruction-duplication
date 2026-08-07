@@ -1,0 +1,122 @@
+[build-system]
+requires = ["setuptools>=83,<84"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "instruction-duplication"
+dynamic = ["version"]
+description = "Run reproducible experiments on instruction placement and repetition"
+readme = "README.md"
+requires-python = ">=3.12.13"
+license = "MIT"
+authors = [{name = "Victor Lavrenko"}]
+classifiers = [
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Typing :: Typed",
+]
+dependencies = [
+  "httpx>=0.28.1,<1",
+  "datasets>=5.0.1,<6",
+  "huggingface_hub>=1.26.1,<2",
+  "packaging>=26.3,<27",
+]
+
+[project.optional-dependencies]
+test = [
+  "coverage[toml]>=7.15,<8",
+  "pytest>=9.1.1,<10",
+  "pytest-asyncio>=1.4,<2",
+]
+dev = [
+  "build>=1.5,<2",
+  "mypy>=2.3,<3",
+  "pyright>=1.1.411,<2",
+  "ruff>=0.16.1,<1",
+]
+
+[project.scripts]
+instruction-duplication = "instruction_duplication.cli:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "instruction_duplication.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+instruction_duplication = ["py.typed", "smoke-profile-2026-08-05.json"]
+
+[tool.pytest.ini_options]
+addopts = "-q --strict-config --strict-markers"
+testpaths = ["tests"]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.coverage.run]
+branch = true
+source = ["instruction_duplication"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+  "E",   # pycodestyle errors
+  "F",   # Pyflakes
+  "I",   # import ordering
+  "UP",  # Python syntax upgrades
+  "B",   # bugbear correctness checks
+  "SIM", # simplifications
+  "C4",  # comprehension correctness
+  "C90", # cyclomatic complexity
+  "DTZ", # timezone-aware datetimes
+  "ASYNC",
+  "LOG",
+  "PERF",
+  "PIE",
+  "RUF",
+]
+ignore = [
+  "E501", # Ruff formatter owns line wrapping.
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 18
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*.py" = ["B018"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = true
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["instruction_duplication"]
+show_error_codes = true
+show_column_numbers = true
+pretty = true
+warn_unreachable = true
+warn_unused_configs = true
+enable_error_code = ["deprecated", "explicit-override"]
+
+[tool.pyright]
+include = ["src"]
+exclude = ["build", "dist", "tests"]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = "none"
+reportUnnecessaryTypeIgnoreComment = "error"
