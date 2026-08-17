@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import os
 import re
 import shutil
 import tempfile
@@ -142,11 +141,14 @@ def write_manifest(root: Path) -> None:
 
 
 def make_readme(root: Path) -> None:
-    (root / "ANONYMOUS_SUPPLEMENT_README.md").write_text(
-        """# Anonymous supplementary code and data\n\n"
-        "This archive accompanies a double-blind submission. Author-identifying metadata has been scrubbed; the scientific source and frozen experiment records are otherwise copied from the reproduction materials.\n\n"
+    text = (
+        "# Anonymous supplementary code and data\n\n"
+        "This archive accompanies a double-blind submission. Author-identifying metadata "
+        "has been scrubbed; the scientific source and frozen experiment records are otherwise "
+        "copied from the reproduction materials.\n\n"
         "## Reanalysis\n\n"
-        "Create a Python environment, install `requirements-research.lock` and the package, then run:\n\n"
+        "Create a Python environment, install `requirements-research.lock` and the package, "
+        "then run:\n\n"
         "```bash\n"
         "python -m pip install -r requirements-research.lock\n"
         "python -m pip install -e .\n"
@@ -154,11 +156,15 @@ def make_readme(root: Path) -> None:
         "instruction-duplication judge --workspace paper-run\n"
         "instruction-duplication analyze --workspace paper-run\n"
         "```\n\n"
-        "Rejudging and analysis use stored generations and do not require provider credentials. New generation requires provider credentials and may not reproduce hosted-provider outputs byte-for-byte.\n\n"
-        "See `docs/reproducibility.md`, `docs/paper-run-parameters.md`, and `docs/experiment.md` for the experimental contract and exact paper-run settings.\n\n"
-        "Human-validation ratings are intentionally not asserted by this package until that audit is finalized.\n",
-        encoding="utf-8",
+        "Rejudging and analysis use stored generations and do not require provider credentials. "
+        "New generation requires provider credentials and may not reproduce hosted-provider "
+        "outputs byte-for-byte.\n\n"
+        "See `docs/reproducibility.md`, `docs/paper-run-parameters.md`, and "
+        "`docs/experiment.md` for the experimental contract and exact paper-run settings.\n\n"
+        "Human-validation ratings are intentionally not asserted by this package until that "
+        "audit is finalized.\n"
     )
+    (root / "ANONYMOUS_SUPPLEMENT_README.md").write_text(text, encoding="utf-8")
 
 
 def build(repo: Path, run: Path, output: Path) -> None:
@@ -188,8 +194,8 @@ def build(repo: Path, run: Path, output: Path) -> None:
         for name in RUN_DIRS:
             copy_tree(run / name, paper_run / name)
 
-        # The blinded human-audit key is not needed for reproducing the automatic paper results
-        # and is withheld until human ratings are finalized.
+        # The treatment/mechanical decoding key is not needed for reproducing the automatic
+        # paper results and is withheld until human ratings are finalized.
         for relative in (
             "paper-run/results/blinded-matched-pair-key.jsonl",
             "paper-run/results/human-audit-schema.json",
