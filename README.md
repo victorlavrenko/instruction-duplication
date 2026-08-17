@@ -98,6 +98,18 @@ instruction-duplication analyze --workspace run-2026-08-12
 
 The frozen run archive will be published as a separate release artifact together with the paper.
 
+For the exact August 12 paper-run model IDs, provider routes, output ceilings, seeds, dataset revisions, and statistical settings, see [docs/paper-run-parameters.md](docs/paper-run-parameters.md). The broader AAAI reproducibility mapping and development-setting rationale are in [docs/reproducibility.md](docs/reproducibility.md).
+
+For double-blind review, do **not** link this author-identifying public repository from the manuscript. Build an anonymized supplementary code/data ZIP from a local checkout plus the frozen run:
+
+```bash
+python scripts/build_aaai_supplement.py \
+  --run /path/to/run-2026-08-12 \
+  --output aaai27-supplement.zip
+```
+
+The builder copies the source and paper-run workspace, scrubs known author-identifying strings from text metadata, withholds the human-audit decoding key until ratings are finalized, writes SHA-256 checksums, and fails if known identifiers remain. The resulting ZIP must still be inspected manually before upload.
+
 ## Experimental design
 
 The instructed conditions ask the model to perform eight reasoning roles in order:
@@ -150,6 +162,8 @@ Automatic measurements are designed to be auditable. The run exports condition-b
 The validation tasks are intentionally atomic. Reviewers are not asked to solve the medical question or decide whether a model's diagnosis is correct. For example, a lexical-coverage task highlights question-specific terms present in each response and asks which response preserves more of them.
 
 Human disagreement is analyzed as a signed correction to the automatic treatment effect rather than requiring perfect human-machine agreement.
+
+The final human-validation protocol and results are intentionally treated separately from the automatic reproduction package until ratings are frozen.
 
 ## Outputs
 
