@@ -2,9 +2,10 @@
 """Build an anonymized AAAI supplementary code/data ZIP.
 
 This helper is for double-blind review. It copies the reproducibility source tree
-and a frozen experiment workspace, strips author-identifying metadata from text
-files, excludes ordinary VCS/build caches, and fails if known identifying strings
-remain. It does not modify the source repository or the original run.
+and a frozen experiment workspace, strips author-identifying metadata from small
+text files, scans every copied file for known identifiers, excludes ordinary
+VCS/build caches, and fails if identifiers remain. It does not modify the source
+repository or the original run.
 
 Paper mapping: Reproducibility, Limitations, and Responsible Use.
 """
@@ -47,6 +48,7 @@ EXCLUDED_NAMES = {
     "PKG-INFO",
 }
 EXCLUDED_SUFFIXES = {".pyc", ".pyo"}
+MAX_IN_MEMORY_SCRUB_BYTES = 16 * 1024 * 1024
 
 # Keep this list narrow and inspect the resulting ZIP manually. These strings are
 # identifiers, not scientific content.
@@ -55,6 +57,10 @@ IDENTIFYING_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"victorlavrenko", re.IGNORECASE), "anonymous-author"),
     (re.compile(r"victor@peacetech\.vc", re.IGNORECASE), "anonymous@example.invalid"),
     (re.compile(r"PeaceTech VC", re.IGNORECASE), "Anonymous Institution"),
+)
+IDENTIFYING_BYTES = tuple(
+    needle.casefold().encode("utf-8")
+    for needle in ("Victor Lavrenko", "victorlavrenko", "victor@peacetech.vc", "PeaceTech VC")
 )
 TEXT_SUFFIXES = {
     ".md",
@@ -97,6 +103,9 @@ def copy_tree(source: Path, destination: Path) -> None:
 
 
 def scrub_text(path: Path) -> None:
+    """Scrub small text metadata; large artifacts are scanned but never rewritten in memory."""
+    if path.stat().st_size > MAX_IN_MEMORY_SCRUB_BYTES:
+        return
     if path.suffix.casefold() not in TEXT_SUFFIXES and path.name not in {"LICENSE", "MANIFEST.in"}:
         return
     try:
@@ -113,23 +122,32 @@ def scrub_text(path: Path) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def contains_identifier(path: Path) -> bool:
+    """Scan any file, including SQLite/large JSONL, without loading it all into memory."""
+    overlap = 128
+    tail = b""
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            folded = (tail + chunk).lower()
+            if any(needle in folded for needle in IDENTIFYING_BYTES):
+                return True
+            tail = folded[-overlap:]
+    return False
+
+
 def assert_anonymous(root: Path) -> None:
     hits: list[str] = []
-    needles = ("Victor Lavrenko", "victorlavrenko", "victor@peacetech.vc", "PeaceTech VC")
     for path in root.rglob("*"):
         if path.is_dir() or ignored(path.relative_to(root)):
             continue
-        if path.suffix.casefold() not in TEXT_SUFFIXES and path.name not in {"LICENSE", "MANIFEST.in"}:
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            continue
-        for needle in needles:
-            if needle.casefold() in text.casefold():
-                hits.append(f"{path.relative_to(root)}: {needle}")
+        if contains_identifier(path):
+            hits.append(path.relative_to(root).as_posix())
     if hits:
-        raise SystemExit("Anonymous-package check failed:\n" + "\n".join(hits))
+        raise SystemExit(
+            "Anonymous-package check failed; identifying strings remain in:\n"
+            + "\n".join(hits)
+            + "\nRemove/scrub those files or update the narrow scrub rules after manual inspection."
+        )
 
 
 def write_manifest(root: Path) -> None:
