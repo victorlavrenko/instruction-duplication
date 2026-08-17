@@ -21,8 +21,8 @@ from .models import SMOKE_PROFILE_ID, Model
 from .protocol import CONDITIONS, PROTOCOL_HASH
 
 MANIFEST_SCHEMA_VERSION = 2
-JUDGE_VERSION = "strict-xml-repair-judge-v3"
-ANALYSIS_VERSION = "paired-question-itt-v4"
+JUDGE_VERSION = __version__
+ANALYSIS_VERSION = __version__
 
 
 @dataclass(frozen=True, slots=True)

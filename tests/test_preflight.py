@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import types
+from pathlib import Path
 
 import httpx
 import pytest
@@ -19,7 +21,24 @@ from instruction_duplication.preflight import (
 )
 from instruction_duplication.provider import Route, fake_response
 from instruction_duplication.records import AttemptRecord, GenerationCell
+from instruction_duplication.storage import Database
 from instruction_duplication.types import AttemptStatus
+
+
+@pytest.fixture(autouse=True)
+def isolate_preflight_tests_from_live_provider_discovery(monkeypatch):
+    """Keep route-selection tests offline even when the host exports proxy settings."""
+
+    async def no_live_openrouter_discovery(selected_model, client):
+        del selected_model, client
+        return []
+
+    monkeypatch.delenv("ALL_PROXY", raising=False)
+    monkeypatch.delenv("all_proxy", raising=False)
+    monkeypatch.setattr(
+        "instruction_duplication.preflight.discover_openrouter_providers",
+        no_live_openrouter_discovery,
+    )
 
 
 def test_discovery_uses_current_hub_schema_and_sorts(monkeypatch):
@@ -97,7 +116,13 @@ async def test_auto_preflight_falls_back_from_huggingface_to_openrouter(monkeypa
     monkeypatch.setattr("instruction_duplication.preflight._probe_route", fake_probe)
 
     progress = []
-    result = await check_routes([model], cell, backend="auto", progress_sink=progress.append)
+    result = await check_routes(
+        [model],
+        cell,
+        backend="auto",
+        progress_sink=progress.append,
+        load_concurrency=2,
+    )
     assert result.routes[model.id].backend == "openrouter"
     assert result.routes[model.id].provider == "deepinfra"
     assert [(event.backend, event.provider, event.status) for event in progress] == [
@@ -112,6 +137,8 @@ async def test_auto_preflight_falls_back_from_huggingface_to_openrouter(monkeypa
         ("huggingface", "deepinfra", 1),
         ("openrouter", "deepinfra", 1),
         ("openrouter", "deepinfra", 2),
+        ("openrouter", "deepinfra", 3),
+        ("openrouter", "deepinfra", 4),
     ]
 
 
@@ -144,10 +171,21 @@ async def test_auto_preflight_uses_model_openrouter_preference_first(monkeypatch
     monkeypatch.setattr("instruction_duplication.preflight._probe_route", fake_probe)
 
     progress = []
-    result = await check_routes([model], cell, backend="auto", progress_sink=progress.append)
+    result = await check_routes(
+        [model],
+        cell,
+        backend="auto",
+        progress_sink=progress.append,
+        load_concurrency=2,
+    )
     assert result.routes[model.id].backend == "openrouter"
     assert result.routes[model.id].provider == "groq"
-    assert calls == [("openrouter", "groq", 1), ("openrouter", "groq", 2)]
+    assert calls == [
+        ("openrouter", "groq", 1),
+        ("openrouter", "groq", 2),
+        ("openrouter", "groq", 3),
+        ("openrouter", "groq", 4),
+    ]
     assert progress[0].backend == "openrouter"
     assert result.provenance["backend_order"][model.id] == ("openrouter", "huggingface")
 
@@ -180,9 +218,15 @@ async def test_per_model_backend_override_changes_auto_order(monkeypatch, questi
         cell,
         backend="auto",
         model_backends={model.id: "huggingface"},
+        load_concurrency=2,
     )
     assert result.routes[model.id].backend == "huggingface"
-    assert calls == [("huggingface", "deepinfra", 1), ("huggingface", "deepinfra", 2)]
+    assert calls == [
+        ("huggingface", "deepinfra", 1),
+        ("huggingface", "deepinfra", 2),
+        ("huggingface", "deepinfra", 3),
+        ("huggingface", "deepinfra", 4),
+    ]
 
 
 @pytest.mark.asyncio
@@ -299,7 +343,7 @@ def probe_route(model, provider="DeepInfra"):
 
 
 @pytest.mark.asyncio
-async def test_probe_route_success_records_cost_and_parseable_answer(question):
+async def test_probe_route_success_records_cost(question):
     model = MODEL_BY_ID["gemma-3-12b"]
     cell = probe_cell(question)
     raw = fake_response(cell)
@@ -312,11 +356,37 @@ async def test_probe_route_success_records_cost_and_parseable_answer(question):
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         result = await _probe_route(client, model, cell, probe_route(model))
-    assert result.content.startswith("<response>")
+    assert result.content.startswith("1. Facts")
     assert result.returned_provider == "DeepInfra"
     assert len(result.attempts) == 1
     assert result.attempts[0].status is AttemptStatus.COMPLETED
-    assert result.attempts[0].accounted_cost_usd == 0.0
+    attempt = result.attempts[0]
+    expected_cost = (
+        int(attempt.input_tokens or 0) * probe_route(model).input_usd_per_million
+        + int(attempt.output_tokens or 0) * probe_route(model).output_usd_per_million
+    ) / 1_000_000
+    assert attempt.accounted_cost_usd == pytest.approx(expected_cost)
+
+
+@pytest.mark.asyncio
+async def test_probe_route_accepts_model_noncompliance_as_route_success(question):
+    model = MODEL_BY_ID["gemma-3-12b"]
+    cell = probe_cell(question)
+    raw = fake_response(cell)
+    raw["provider"] = "DeepInfra"
+    raw["choices"][0]["message"]["content"] = (
+        "<facts>The stem mentions a patient.</facts>\n"
+        "<implications>I am not going to choose an option.</implications>"
+    )
+
+    async def handler(request):
+        return httpx.Response(200, request=request, json=raw)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await _probe_route(client, model, cell, probe_route(model))
+
+    assert result.attempts[0].status is AttemptStatus.COMPLETED
+    assert "not going to choose" in result.content
 
 
 @pytest.mark.asyncio
@@ -333,17 +403,17 @@ async def test_probe_route_accepts_single_xml_markdown_fence(question):
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         result = await _probe_route(client, model, cell, probe_route(model))
-    assert result.content.startswith("```xml\n<response>")
+    assert result.content.startswith("```xml\n1. Facts")
     assert result.attempts[0].status is AttemptStatus.COMPLETED
 
 
 @pytest.mark.asyncio
-async def test_probe_route_accepts_malformed_xml_when_final_answer_is_parseable(question):
+async def test_probe_route_accepts_unusual_section_punctuation_when_answer_is_parseable(question):
     model = MODEL_BY_ID["gemma-3-12b"]
     cell = probe_cell(question)
     raw = fake_response(cell)
     message = raw["choices"][0]["message"]
-    message["content"] = message["content"].replace("<facts>", "<facts>R&D evidence: ", 1)
+    message["content"] = message["content"].replace("1. Facts", "1. Facts — R&D evidence:", 1)
     raw["provider"] = "DeepInfra"
 
     async def handler(request):
@@ -352,7 +422,7 @@ async def test_probe_route_accepts_malformed_xml_when_final_answer_is_parseable(
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         result = await _probe_route(client, model, cell, probe_route(model))
 
-    assert result.content.startswith("<response>")
+    assert result.content.startswith("1. Facts — R&D evidence:")
     assert result.attempts[0].status is AttemptStatus.COMPLETED
 
 
@@ -378,6 +448,32 @@ async def test_probe_retries_transient_http_with_same_idempotency(monkeypatch, q
         AttemptStatus.HTTP_ERROR,
         AttemptStatus.COMPLETED,
     ]
+    assert result.attempts[0].accounted_cost_usd == 0.0
+    assert len(set(calls)) == 1
+
+
+@pytest.mark.asyncio
+async def test_probe_default_rejects_sustained_rate_limit_after_three_attempts(
+    monkeypatch, question
+):
+    model = MODEL_BY_ID["gemma-3-12b"]
+    cell = probe_cell(question)
+    calls = []
+
+    async def handler(request):
+        calls.append(request.headers["Idempotency-Key"])
+        return httpx.Response(429, request=request, headers={"Retry-After": "0"})
+
+    monkeypatch.setattr("instruction_duplication.preflight.retry_delay", lambda *args: 0.0)
+    budget = PreflightBudget(cap=1.0)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ProbeFailure) as captured:
+            await _probe_route(client, model, cell, probe_route(model), budget=budget)
+
+    assert len(captured.value.attempts) == 3
+    assert all(attempt.accounted_cost_usd == 0.0 for attempt in captured.value.attempts)
+    assert budget.committed == 0.0
+    assert budget.reserved == 0.0
     assert len(set(calls)) == 1
 
 
@@ -400,6 +496,80 @@ async def test_probe_truncation_is_terminal_and_retains_attempt(question):
 
 
 @pytest.mark.asyncio
+async def test_probe_rejects_unexpected_finish_reason_without_retry(question):
+    model = MODEL_BY_ID["gemma-3-12b"]
+    cell = probe_cell(question)
+    raw = fake_response(cell)
+    raw["provider"] = "DeepInfra"
+    raw["choices"][0]["finish_reason"] = "error"
+
+    async def handler(request):
+        return httpx.Response(200, request=request, json=raw)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ProbeFailure) as captured:
+            await _probe_route(client, model, cell, probe_route(model), transport_retries=5)
+    assert len(captured.value.attempts) == 1
+    assert captured.value.attempts[0].status is AttemptStatus.INVALID_RESPONSE
+
+
+@pytest.mark.asyncio
+async def test_probe_retains_complete_stop_when_reported_usage_exceeds_ceiling(question):
+    model = MODEL_BY_ID["gemma-3-12b"]
+    cell = probe_cell(question)
+    raw = fake_response(cell)
+    raw["provider"] = "DeepInfra"
+    raw["usage"]["completion_tokens"] = model.request_output_tokens + 1
+
+    async def handler(request):
+        return httpx.Response(200, request=request, json=raw)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await _probe_route(client, model, cell, probe_route(model))
+    assert result.attempts[0].status is AttemptStatus.COMPLETED
+    assert result.attempts[0].output_tokens == model.request_output_tokens + 1
+
+
+@pytest.mark.asyncio
+async def test_probe_rerun_uses_fresh_physical_and_provider_request_ids(
+    tmp_path: Path, question
+):
+    model = MODEL_BY_ID["gemma-3-12b"]
+    cell = probe_cell(question)
+    raw = fake_response(cell)
+    raw["provider"] = "DeepInfra"
+    idempotency_keys: list[str] = []
+
+    async def handler(request):
+        idempotency_keys.append(request.headers["Idempotency-Key"])
+        return httpx.Response(200, request=request, json=raw)
+
+    with Database(tmp_path / "run.sqlite3") as db:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            first = await _probe_route(
+                client,
+                model,
+                cell,
+                probe_route(model),
+                probe_index=1,
+                attempt_sink=db.record_attempts,
+            )
+            second = await _probe_route(
+                client,
+                model,
+                cell,
+                probe_route(model),
+                probe_index=1,
+                attempt_sink=db.record_attempts,
+            )
+        stored = list(db.attempts())
+
+    assert len(stored) == 2
+    assert first.attempts[0].request_key != second.attempts[0].request_key
+    assert idempotency_keys[0] != idempotency_keys[1]
+
+
+@pytest.mark.asyncio
 async def test_route_selection_preserves_rejected_probe_attempts(monkeypatch, question):
     model = MODEL_BY_ID["llama-3.3-70b-instruct"]
     cell = probe_cell(question)
@@ -419,9 +589,15 @@ async def test_route_selection_preserves_rejected_probe_attempts(monkeypatch, qu
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "token")
     monkeypatch.setattr("instruction_duplication.preflight._probe_route", fake_probe)
-    result = await check_routes([model], cell, backend="openrouter")
+    result = await check_routes([model], cell, backend="openrouter", load_concurrency=2)
     assert result.routes[model.id].provider == model.openrouter_providers[1]
-    assert [attempt.request_key for attempt in result.attempts] == ["rejected", "ok-1", "ok-2"]
+    assert [attempt.request_key for attempt in result.attempts] == [
+        "rejected",
+        "ok-1",
+        "ok-2",
+        "ok-3",
+        "ok-4",
+    ]
     assert calls[:2] == [(model.openrouter_providers[0], 1), (model.openrouter_providers[1], 1)]
 
 
@@ -446,14 +622,104 @@ async def test_second_probe_failure_keeps_first_and_second_attempt_once(monkeypa
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "token")
     monkeypatch.setattr("instruction_duplication.preflight._probe_route", fake_probe)
-    result = await check_routes([model], cell, backend="openrouter")
+    result = await check_routes([model], cell, backend="openrouter", load_concurrency=2)
     keys = [attempt.request_key for attempt in result.attempts]
     assert keys == [
         f"{model.openrouter_providers[0]}-1",
         "first-provider-bad-2",
         f"{model.openrouter_providers[1]}-1",
         f"{model.openrouter_providers[1]}-2",
+        f"{model.openrouter_providers[1]}-3",
+        f"{model.openrouter_providers[1]}-4",
     ]
+
+
+@pytest.mark.asyncio
+async def test_capacity_probe_batch_reaches_requested_simultaneous_load(monkeypatch, question):
+    model = MODEL_BY_ID["gemma-3-12b"]
+    cell = probe_cell(question)
+    raw = fake_response(cell)
+    raw["provider"] = "DeepInfra"
+    calls = 0
+    active = 0
+    maximum = 0
+    release = asyncio.Event()
+
+    async def handler(request):
+        nonlocal calls, active, maximum
+        calls += 1
+        if calls > 2:
+            active += 1
+            maximum = max(maximum, active)
+            if active == 4:
+                release.set()
+            try:
+                await asyncio.wait_for(release.wait(), timeout=1.0)
+            finally:
+                active -= 1
+        return httpx.Response(200, request=request, json=raw)
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "token")
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+
+    async def client_for(self, route):
+        del self, route
+        return client
+
+    monkeypatch.setattr(
+        "instruction_duplication.preflight.PreflightSession.client_for",
+        client_for,
+    )
+    try:
+        result = await check_routes(
+            [model],
+            cell,
+            backend="openrouter",
+            load_concurrency=4,
+        )
+    finally:
+        await client.aclose()
+
+    assert maximum == 4
+    assert len(result.attempts) == 6
+    models = object_value(result.provenance["models"], name="preflight.models")
+    candidates = models[model.id]
+    assert is_object_sequence(candidates)
+    selected = object_value(candidates[-1], name="selected candidate")
+    assert selected["capacity_test_concurrency"] == 4
+    assert selected["capacity_test_succeeded"] == 4
+
+
+@pytest.mark.asyncio
+async def test_capacity_failure_rejects_candidate_and_tries_next_provider(monkeypatch, question):
+    model = MODEL_BY_ID["llama-3.3-70b-instruct"]
+    cell = probe_cell(question)
+
+    async def fake_probe(client, selected_model, selected_cell, route, **kwargs):
+        del client, selected_model, selected_cell
+        probe_index = kwargs["probe_index"]
+        record = attempt_record(f"{route.provider}-{probe_index}")
+        if route.provider == model.openrouter_providers[0] and probe_index == 3:
+            raise ProbeFailure("HTTP 429 during capacity test", [record])
+        return ProbeResult("stable", (record,), route.provider)
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "token")
+    monkeypatch.setattr("instruction_duplication.preflight._probe_route", fake_probe)
+    result = await check_routes(
+        [model],
+        cell,
+        backend="openrouter",
+        load_concurrency=2,
+    )
+
+    assert result.routes[model.id].provider == model.openrouter_providers[1]
+    models = object_value(result.provenance["models"], name="preflight.models")
+    candidates = models[model.id]
+    assert is_object_sequence(candidates)
+    first = object_value(candidates[0], name="first candidate")
+    assert first["result"] == "rejected"
+    assert "capacity test failed" in str(first["error"])
 
 
 @pytest.mark.asyncio

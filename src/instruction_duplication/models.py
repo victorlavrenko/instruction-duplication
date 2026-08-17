@@ -118,9 +118,12 @@ def _preferred_backend(value: object) -> PreferredBackend:
     raise ValueError(f"invalid preferred backend: {value!r}")
 
 
-# The request ceilings are based on the attached 30-question / 1,680-cell smoke run.
-# Each is the observed per-model maximum plus at least 25%, rounded up to 256 tokens.
-# The provider capability is retained as metadata and is not used for budget estimation.
+# The request ceilings retain the loop-bounding 30-question / 1,680-cell smoke calibration.
+# Mistral Large is the one targeted exception: a later 240-cell current-protocol smoke observed
+# an ordinary stop completion at 1,663 tokens, so its 1,792-token legacy ceiling is restored to
+# the previously validated 2,304-token ceiling. Other ceilings remain bounded rather than being
+# raised toward provider maxima. The packaged profile records the supplemental evidence.
+# Provider capability is retained as metadata and is not used for budget estimation.
 MODELS: tuple[Model, ...] = (
     Model(
         "gemma-3-12b",
@@ -139,7 +142,7 @@ MODELS: tuple[Model, ...] = (
         "llama-3.3-70b-instruct",
         "meta-llama/Llama-3.3-70B-Instruct",
         "meta-llama/llama-3.3-70b-instruct",
-        ("groq", "crusoe", "novita", "deepinfra"),
+        ("deepinfra", "novita", "crusoe", "groq"),
         "openrouter",
         0.10,
         0.32,
@@ -183,7 +186,7 @@ MODELS: tuple[Model, ...] = (
         0.50,
         1.50,
         16,
-        1792,
+        2304,
         14_000,
         1309,
     ),
@@ -207,7 +210,7 @@ MODELS: tuple[Model, ...] = (
         ("alibaba", "parasail", "novita", "deepinfra"),
         "openrouter",
         0.10,
-        0.10,
+        0.62,
         16,
         2816,
         14_000,
@@ -216,7 +219,8 @@ MODELS: tuple[Model, ...] = (
 )
 
 MODEL_BY_ID = {model.id: model for model in MODELS}
-SMOKE_PROFILE_ID = "run.tgz-2026-08-05-1680-cells"
+SMOKE_PROFILE_SCHEMA_VERSION = 2
+SMOKE_PROFILE_ID = "run.tgz-2026-08-05-plus-2026-08-10-ceiling-fix-v1"
 
 
 def select_models(ids: Iterable[str] | None = None) -> list[Model]:

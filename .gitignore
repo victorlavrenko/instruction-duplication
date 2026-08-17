@@ -50,9 +50,5 @@ Desktop.ini
 *.log
 .*.tmp
 
-# Transient files in the committed default experiment workspace.
-# Do not ignore run/ itself: the completed run is a versioned research artifact.
-/run/.lock
-/run/state/run.sqlite3-wal
-/run/state/run.sqlite3-shm
-/run/state/run.sqlite3-journal
+# runs are too big for GitHub
+/run*

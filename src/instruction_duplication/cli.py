@@ -9,17 +9,25 @@ import json
 import logging
 import math
 import sys
+import threading
+import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from types import TracebackType
+from typing import Self
 
 from . import __version__
+from .audit import export_blinded_matched_pairs, model_eligibility_snapshot
 from .datasets_loader import (
     DEFAULT_DATASETS,
     DEFAULT_SEED,
+    SELECTION_ALGORITHM,
     select_questions,
     source_descriptor,
 )
 from .environment import runtime_environment
+from .exclusions import QuestionExclusions, load_question_exclusions
+from .facts import QuestionFacts, build_fact_inventory, question_qc
 from .generate import (
     BUDGET_SAFETY_FACTOR,
     GenerationProgress,
@@ -28,10 +36,16 @@ from .generate import (
     route_parallelism_summary,
     run_pending,
 )
-from .io_utils import read_json, sha256_json, write_json, write_jsonl, write_text
+from .io_utils import read_json, read_jsonl, sha256_json, write_json, write_jsonl, write_text
 from .json_types import JsonObject, is_object_sequence, json_object, object_value, string_mapping
 from .judge import judge
-from .lexical import LEXICAL_VERSION, build_reference
+from .lexical import (
+    LEXICAL_VERSION,
+    build_pubmed_reference,
+    build_reference,
+    compile_reference,
+    selected_terms_hash,
+)
 from .manifest import build_manifest
 from .models import Model, select_models
 from .preflight import (
@@ -43,19 +57,167 @@ from .preflight import (
     check_routes,
 )
 from .provider import Route, estimate_cost, normalize_routes, request_payload
+from .pubmed_idf import ensure_pubmed_vocabulary
 from .records import JudgmentWrite
-from .report import render_report
-from .stats import build_analysis
+from .report import (
+    render_model_effect_summary_csv,
+    render_model_effects_csv,
+    render_paper_report,
+    render_report,
+)
+from .schedule import build_generation_schedule
+from .stats import AnalysisProgress, analysis_work_units, build_analysis
 from .storage import Database
 from .types import Question
 from .workspace import Workspace
 
 LOGGER = logging.getLogger("instruction_duplication")
+PROGRESS_HEARTBEAT_SECONDS = 30.0
 
 
 def _progress(message: str) -> None:
     """Write concise operational progress without mixing it with report output."""
     print(message, file=sys.stderr, flush=True)
+
+
+class _ProgressMonitor:
+    """Emit live progress plus a heartbeat while a synchronous CLI phase is busy."""
+
+    def __init__(
+        self,
+        label: str,
+        unit: str,
+        *,
+        phase: str,
+        total: int | None = None,
+        show_rate: bool = False,
+        heartbeat_seconds: float = PROGRESS_HEARTBEAT_SECONDS,
+    ) -> None:
+        self._label = label
+        self._unit = unit
+        self._total = total
+        self._show_rate = show_rate
+        self._heartbeat_seconds = heartbeat_seconds
+        self._phase = phase
+        self._detail = ""
+        self._completed = 0
+        self._started_at = 0.0
+        self._next_decile: int | None = None
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> Self:
+        self._started_at = time.monotonic()
+        self._set_next_decile()
+        self._emit()
+        self._thread = threading.Thread(
+            target=self._heartbeat_loop,
+            name=f"{self._label}-progress",
+            daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
+
+    def set_total(self, total: int) -> None:
+        if total < 0:
+            raise ValueError("progress total must be non-negative")
+        with self._lock:
+            self._total = total
+            self._set_next_decile_locked()
+        self._emit()
+
+    def update(
+        self,
+        *,
+        completed: int | None = None,
+        phase: str | None = None,
+        detail: str | None = None,
+        force: bool = False,
+    ) -> None:
+        should_emit = force
+        with self._lock:
+            if completed is not None:
+                if completed < 0:
+                    raise ValueError("progress completion must be non-negative")
+                if self._total is not None and completed > self._total:
+                    raise ValueError("progress completion exceeds total")
+                self._completed = completed
+            if phase is not None and phase != self._phase:
+                self._phase = phase
+                should_emit = True
+            if detail is not None:
+                self._detail = detail
+            if self._total is not None and self._completed == self._total:
+                should_emit = True
+            if self._next_decile is not None and self._completed >= self._next_decile:
+                should_emit = True
+                self._advance_decile_locked()
+        if should_emit:
+            self._emit()
+
+    def _set_next_decile(self) -> None:
+        with self._lock:
+            self._set_next_decile_locked()
+
+    def _set_next_decile_locked(self) -> None:
+        if self._total is None or self._total < 100:
+            self._next_decile = None
+            return
+        step = max(1, math.ceil(self._total / 10))
+        self._next_decile = step
+        while self._next_decile <= self._completed:
+            self._next_decile += step
+
+    def _advance_decile_locked(self) -> None:
+        if self._total is None or self._next_decile is None:
+            return
+        step = max(1, math.ceil(self._total / 10))
+        while self._next_decile <= self._completed:
+            self._next_decile += step
+
+    def _heartbeat_loop(self) -> None:
+        while not self._stop.wait(self._heartbeat_seconds):
+            self._emit()
+
+    def _emit(self) -> None:
+        now = time.monotonic()
+        with self._lock:
+            completed = self._completed
+            total = self._total
+            phase = self._phase
+            detail = self._detail
+        elapsed = max(0.0, now - self._started_at)
+        if total is None:
+            message = f"[{self._label}] elapsed={_format_duration(math.floor(elapsed))}"
+        else:
+            percent = 100.0 * completed / total if total else 100.0
+            message = f"[{self._label}] {completed}/{total} {self._unit} ({percent:.0f}%)"
+            if self._show_rate:
+                rate = completed / elapsed if elapsed > 0 and completed else None
+                rate_text = (
+                    f"{rate * 60:.1f} {self._unit}/min" if rate is not None else "calculating"
+                )
+                eta = (total - completed) / rate if rate is not None and rate > 0 else None
+                if completed == total:
+                    eta = 0.0
+                message += f", rate={rate_text}, ETA={_format_duration(eta)}"
+            else:
+                message += f", elapsed={_format_duration(math.floor(elapsed))}"
+        message += f" — {phase}"
+        if detail:
+            message += f": {detail}"
+        _progress(message)
 
 
 def _short_error(message: str, *, limit: int = 140) -> str:
@@ -231,12 +393,21 @@ def _models(ws: Workspace) -> list[Model]:
     ]
 
 
+def _selection_exclusions(
+    args: argparse.Namespace,
+) -> tuple[QuestionExclusions, JsonObject, list[JsonObject]]:
+    paths = tuple(Path(value) for value in args.exclude_workspace)
+    return load_question_exclusions(paths)
+
+
 def _requested_selection(args: argparse.Namespace) -> JsonObject:
+    _exclusions, identity, _audit = _selection_exclusions(args)
     return {
         "datasets": list(args.datasets),
         "questions_per_dataset": int(args.questions_per_dataset),
         "seed": int(args.seed),
-        "algorithm": "normalize-deduplicate-shuffle-v2",
+        "algorithm": SELECTION_ALGORITHM,
+        "question_exclusions": identity,
     }
 
 
@@ -283,6 +454,10 @@ def _prepare_workspace(args: argparse.Namespace) -> tuple[int, int, int]:
             ws.dataset_audit,
             ws.environment,
             ws.lexical_reference,
+            ws.fact_inventory,
+            ws.question_qc,
+            ws.generation_schedule,
+            ws.model_eligibility,
             ws.database,
         )
         if path.exists()
@@ -294,11 +469,15 @@ def _prepare_workspace(args: argparse.Namespace) -> tuple[int, int, int]:
             + "); remove the workspace contents or use a new workspace"
         )
 
+    exclusions, exclusion_identity, exclusion_audit = _selection_exclusions(args)
     questions, audit = select_questions(
         dataset_names=args.datasets,
         questions_per_dataset=args.questions_per_dataset,
         seed=args.seed,
         input_jsonl=Path(args.input_jsonl) if args.input_jsonl else None,
+        exclusions=exclusions,
+        exclusion_identity=exclusion_identity,
+        exclusion_audit=exclusion_audit,
     )
     models = select_models(args.models)
     question_rows = [question.to_dict() for question in questions]
@@ -318,13 +497,39 @@ def _prepare_workspace(args: argparse.Namespace) -> tuple[int, int, int]:
     write_json(ws.models, model_rows)
     write_json(ws.dataset_audit, audit)
     write_json(ws.environment, environment)
-    write_json(ws.lexical_reference, build_reference(questions))
+    inventories = build_fact_inventory(questions)
+    write_jsonl(ws.fact_inventory, [inventory.to_dict() for inventory in inventories])
+    write_jsonl(
+        ws.question_qc,
+        [
+            question_qc(question, inventory)
+            for question, inventory in zip(questions, inventories, strict=True)
+        ],
+    )
+    write_json(ws.model_eligibility, model_eligibility_snapshot(models))
+    if bool(getattr(args, "fake", False)):
+        lexical_reference = build_reference(questions)
+    else:
+        vocabulary = ensure_pubmed_vocabulary(
+            source_path=(Path(args.idf_source) if getattr(args, "idf_source", None) else None),
+            progress=_progress,
+        )
+        lexical_reference = build_pubmed_reference(questions, vocabulary)
+    write_json(ws.lexical_reference, lexical_reference)
     try:
         with Database(ws.database) as db:
             cells = db.prepare(questions, [model.id for model in models])
     except BaseException:
         ws.database.unlink(missing_ok=True)
         raise
+    write_json(
+        ws.generation_schedule,
+        build_generation_schedule(
+            questions,
+            [model.id for model in models],
+            cell_id=Database.cell_id,
+        ),
+    )
     write_json(ws.manifest, manifest.to_dict())
     LOGGER.info(
         "prepared questions=%d models=%d cells=%d manifest=%s",
@@ -338,8 +543,17 @@ def _prepare_workspace(args: argparse.Namespace) -> tuple[int, int, int]:
 
 def _route_document(ws: Workspace, models: list[Model]) -> tuple[dict[str, Route], JsonObject]:
     value = read_json(ws.routes)
-    if not isinstance(value, dict) or value.get("schema_version") != 2:
+    if not isinstance(value, dict) or value.get("schema_version") not in (2, 3):
         raise RuntimeError("routes.json is absent or incompatible; rerun preflight")
+    if value.get("schema_version") == 3:
+        load_concurrency = value.get("load_concurrency")
+        if (
+            value.get("preflight_policy") != "concurrent-load-v1"
+            or not isinstance(load_concurrency, int)
+            or isinstance(load_concurrency, bool)
+            or load_concurrency < 1
+        ):
+            raise RuntimeError("routes.json lacks valid concurrent-load qualification")
     manifest = ws.load_manifest()
     if value.get("manifest_identity_hash") != manifest.identity_hash:
         raise RuntimeError("routes were generated for a different experiment manifest")
@@ -360,10 +574,18 @@ def _pin_routes(
     model_backends: Mapping[str, LiveBackend] | None = None,
     max_cost: float | None = None,
     progress_sink: PreflightProgressSink | None = None,
+    load_concurrency: int = 8,
 ) -> dict[str, Route]:
     manifest = ws.require_prepared()
     models = _models(ws)
     with Database(ws.database) as db:
+        existing_routes: dict[str, Route] | None = None
+        generated_models: set[str] = set()
+        if ws.routes.is_file():
+            existing_routes, _existing_document = _route_document(ws, models)
+            generated_models = {
+                str(row["model_id"]) for row in db.attempts() if row["phase"] == "generation"
+            }
         representative = db.representative_cell()
         try:
             result = asyncio.run(
@@ -378,14 +600,38 @@ def _pin_routes(
                     committed_cost=db.spend(),
                     attempt_sink=db.record_attempts,
                     progress_sink=progress_sink,
+                    load_concurrency=load_concurrency,
                 )
             )
         except PreflightRunError as exc:
             write_json(ws.preflight_log, exc.provenance)
             raise
+        if existing_routes is not None and generated_models:
+            changed = [
+                model_id
+                for model_id in sorted(generated_models)
+                if (
+                    result.routes[model_id].backend,
+                    result.routes[model_id].provider,
+                    result.routes[model_id].model,
+                )
+                != (
+                    existing_routes[model_id].backend,
+                    existing_routes[model_id].provider,
+                    existing_routes[model_id].model,
+                )
+            ]
+            if changed:
+                raise RuntimeError(
+                    "preflight selected a different route after generation had begun for: "
+                    + ", ".join(changed)
+                    + "; provider identity cannot change within one experimental workspace"
+                )
     raw_routes = {model_id: route.to_dict() for model_id, route in result.routes.items()}
     route_document = {
-        "schema_version": 2,
+        "schema_version": 3,
+        "preflight_policy": "concurrent-load-v1",
+        "load_concurrency": load_concurrency,
         "manifest_identity_hash": manifest.identity_hash,
         "routes_hash": sha256_json(raw_routes),
         "routes": raw_routes,
@@ -449,51 +695,135 @@ def _run_generation(
         )
 
 
-def _judge_workspace(ws: Workspace) -> int:
-    ws.require_prepared(require_runtime_environment=False)
-    reference = read_json(ws.lexical_reference)
-    if not isinstance(reference, dict) or reference.get("lexical_version") != LEXICAL_VERSION:
-        raise RuntimeError("lexical reference is incompatible")
-    total = 0
-    with Database(ws.database) as db:
-        targets = db.judgment_targets(lexical_version=LEXICAL_VERSION)
-        batch: list[JudgmentWrite] = []
-        for row in targets:
-            question = Question(
-                id=str(row["question_id"]),
-                dataset=str(row["dataset"]),
-                stem=str(row["stem"]),
-                choices=string_mapping(row["choices"], name="judgment_target.choices"),
-                gold=str(row["gold"]),
-                gold_text=str(row["gold_text"]),
-                gold_source=str(row["gold_source"]),
-                gold_raw=str(row["gold_raw"]),
-                source_split=str(row["source_split"]),
-            )
-            judgment = judge(
-                question,
-                str(row["status"]),
-                row["content"],
-                str(row["condition_id"]),
-                reference,
-            )
-            batch.append(
-                JudgmentWrite(
-                    cell_id=str(row["cell_id"]),
-                    content_hash=str(row["content_hash"]),
-                    judged_at=dt.datetime.now(dt.UTC).isoformat(),
-                    judgment=json_object(judgment, path="judge result"),
-                    question_id=question.id,
+def _current_lexical_reference(
+    ws: Workspace,
+    *,
+    idf_source: Path | None = None,
+) -> JsonObject:
+    """Reuse a current frozen reference or rebuild it from pinned global PubMed IDF."""
+    rows = read_jsonl(ws.questions)
+    questions = [Question.from_dict(row) for row in rows]
+    if ws.lexical_reference.is_file():
+        stored = read_json(ws.lexical_reference)
+        if (
+            isinstance(stored, dict)
+            and stored.get("lexical_version") == LEXICAL_VERSION
+            and stored.get("selected_terms_hash") == selected_terms_hash(questions)
+        ):
+            return json_object(stored, path="lexical reference")
+    vocabulary = ensure_pubmed_vocabulary(source_path=idf_source, progress=_progress)
+    reference = build_pubmed_reference(questions, vocabulary)
+    write_json(ws.lexical_reference, reference)
+    return reference
+
+
+def _current_fact_inventory(ws: Workspace) -> dict[str, QuestionFacts]:
+    """Regenerate automatic fact/QC files when rejudging an older workspace."""
+    question_rows = read_jsonl(ws.questions)
+    questions = [Question.from_dict(row) for row in question_rows]
+    inventory_rows: list[JsonObject]
+    try:
+        inventory_rows = read_jsonl(ws.fact_inventory)
+        inventories = [QuestionFacts.from_dict(row) for row in inventory_rows]
+        if [item.question_id for item in inventories] != [item.id for item in questions]:
+            raise ValueError("fact inventory question order differs from questions.jsonl")
+    except (FileNotFoundError, ValueError):
+        inventories = build_fact_inventory(questions)
+        write_jsonl(ws.fact_inventory, [item.to_dict() for item in inventories])
+    write_jsonl(
+        ws.question_qc,
+        [
+            question_qc(question, inventory)
+            for question, inventory in zip(questions, inventories, strict=True)
+        ],
+    )
+    return {item.question_id: item for item in inventories}
+
+
+def _judge_workspace(ws: Workspace, *, idf_source: Path | None = None) -> int:
+    manifest = ws.require_stored_run_integrity(require_runtime_environment=False)
+    with _ProgressMonitor(
+        "judge",
+        "cells",
+        phase="checking judgment versions",
+        show_rate=True,
+    ) as progress:
+        reference_document = _current_lexical_reference(ws, idf_source=idf_source)
+        reference = compile_reference(reference_document)
+        fact_inventory = _current_fact_inventory(ws)
+        if not ws.model_eligibility.is_file():
+            try:
+                eligible_models = _models(ws)
+            except ValueError:
+                _progress(
+                    "[judge] legacy model configuration cannot be re-certified by the "
+                    "current eligibility schema; generations remain reanalyzable"
                 )
+            else:
+                write_json(ws.model_eligibility, model_eligibility_snapshot(eligible_models))
+        total = 0
+        with Database(ws.database) as db:
+            targets = db.judgment_targets(
+                lexical_version=LEXICAL_VERSION,
+                generation_protocol_hash=manifest.protocol_hash,
             )
-            if len(batch) >= 500:
-                db.put_judgments(batch, lexical_version=LEXICAL_VERSION)
+            progress.set_total(len(targets))
+            if not targets:
+                progress.update(phase="all judgments are current", force=True)
+                return 0
+            progress.update(phase="computing deterministic judgments")
+            batch: list[JudgmentWrite] = []
+            for processed, row in enumerate(targets, start=1):
+                question = Question(
+                    id=str(row["question_id"]),
+                    dataset=str(row["dataset"]),
+                    stem=str(row["stem"]),
+                    choices=string_mapping(row["choices"], name="judgment_target.choices"),
+                    gold=str(row["gold"]),
+                    gold_text=str(row["gold_text"]),
+                    gold_source=str(row["gold_source"]),
+                    gold_raw=str(row["gold_raw"]),
+                    source_split=str(row["source_split"]),
+                )
+                judgment = judge(
+                    question,
+                    str(row["status"]),
+                    row["content"],
+                    str(row["condition_id"]),
+                    reference,
+                    fact_inventory[question.id],
+                )
+                batch.append(
+                    JudgmentWrite(
+                        cell_id=str(row["cell_id"]),
+                        content_hash=str(row["content_hash"]),
+                        judged_at=dt.datetime.now(dt.UTC).isoformat(),
+                        judgment=json_object(judgment, path="judge result"),
+                        question_id=question.id,
+                    )
+                )
+                progress.update(completed=processed)
+                if len(batch) >= 500:
+                    db.put_judgments(
+                        batch,
+                        lexical_version=LEXICAL_VERSION,
+                        generation_protocol_hash=manifest.protocol_hash,
+                    )
+                    total += len(batch)
+                    batch.clear()
+            if batch:
+                db.put_judgments(
+                    batch,
+                    lexical_version=LEXICAL_VERSION,
+                    generation_protocol_hash=manifest.protocol_hash,
+                )
                 total += len(batch)
-                batch.clear()
-        if batch:
-            db.put_judgments(batch, lexical_version=LEXICAL_VERSION)
-            total += len(batch)
-    return total
+            progress.update(
+                completed=len(targets),
+                phase="judgments persisted",
+                force=True,
+            )
+        return total
 
 
 def _analyze_workspace(
@@ -503,26 +833,116 @@ def _analyze_workspace(
     bootstraps: int,
     confidence_level: float,
 ) -> JsonObject:
-    manifest = ws.require_prepared(require_runtime_environment=False)
-    with Database(ws.database) as db:
-        rows = list(db.iter_analysis_rows())
-        missing = sum(row.judgment is None for row in rows)
-        if missing:
-            raise RuntimeError(f"{missing} cells lack current judgments; run judge first")
-        analysis = build_analysis(
-            rows,
-            permutations=permutations,
-            bootstraps=bootstraps,
-            confidence_level=confidence_level,
-        )
-        analysis["manifest_identity_hash"] = manifest.identity_hash
-        analysis["environment_hash"] = manifest.environment_hash
-        analysis["software_version"] = __version__
-        write_json(ws.analysis, analysis)
-        write_text(ws.report, render_report(analysis))
-        write_jsonl(ws.cells_export, db.iter_rows())
-        write_jsonl(ws.attempts_export, db.attempts())
-    return analysis
+    manifest = ws.require_stored_run_integrity(require_runtime_environment=False)
+    with _ProgressMonitor(
+        "analysis",
+        "contrasts",
+        phase="loading current judgments",
+    ) as progress:
+        with Database(ws.database) as db:
+            stale = len(
+                db.judgment_targets(
+                    lexical_version=LEXICAL_VERSION,
+                    generation_protocol_hash=manifest.protocol_hash,
+                )
+            )
+            if stale:
+                raise RuntimeError(f"{stale} cells lack current judgments; run judge first")
+            rows = list(db.iter_analysis_rows())
+            missing = sum(row.judgment is None for row in rows)
+            if missing:
+                raise RuntimeError(f"{missing} cells lack current judgments; run judge first")
+            work_units = analysis_work_units(rows)
+            progress.set_total(work_units)
+
+            def report_analysis_progress(event: AnalysisProgress) -> None:
+                progress.update(
+                    completed=event.completed,
+                    phase=event.phase,
+                    detail=event.detail,
+                )
+
+            analysis = build_analysis(
+                rows,
+                permutations=permutations,
+                bootstraps=bootstraps,
+                confidence_level=confidence_level,
+                progress_sink=report_analysis_progress,
+            )
+            reference = read_json(ws.lexical_reference)
+            if not isinstance(reference, dict):
+                raise RuntimeError("lexical reference is not a JSON object")
+            analysis["manifest_identity_hash"] = manifest.identity_hash
+            analysis["environment_hash"] = manifest.environment_hash
+            analysis["software_version"] = __version__
+            analysis["lexical_measurement"] = {
+                "lexical_version": str(reference["lexical_version"]),
+                "reference_scope": str(reference["reference_scope"]),
+                "document_count": reference["document_count"],
+                "idf_formula": str(reference["idf_formula"]),
+                "idf_cap": reference["idf_cap"],
+                "high_idf_threshold": reference["high_idf_threshold"],
+                "source": reference["source"],
+                "selected_terms_hash": reference["selected_terms_hash"],
+                "reference_hash": sha256_json(reference),
+            }
+            qc_rows = read_jsonl(ws.question_qc)
+            targeted = sum(str(row.get("review_priority")) == "targeted" for row in qc_rows)
+            eligible = sum(bool(row.get("repair_endpoint_eligible")) for row in qc_rows)
+            analysis["question_quality"] = {
+                "questions": len(qc_rows),
+                "repair_endpoint_eligible": eligible,
+                "repair_endpoint_inapplicable": len(qc_rows) - eligible,
+                "targeted_review_flags": targeted,
+                "gold_conflicts_after_normalization": sum(
+                    bool(row.get("gold_conflict_detected")) for row in qc_rows
+                ),
+                "fact_inventory_review_status": "automatic_unreviewed",
+            }
+            schedule = (
+                read_json(ws.generation_schedule) if ws.generation_schedule.is_file() else None
+            )
+            if isinstance(schedule, dict):
+                analysis["generation_schedule"] = {
+                    "schedule_version": schedule.get("schedule_version"),
+                    "cell_count": schedule.get("cell_count"),
+                    "schedule_hash": schedule.get("schedule_hash"),
+                }
+            eligibility = (
+                read_json(ws.model_eligibility) if ws.model_eligibility.is_file() else None
+            )
+            if isinstance(eligibility, dict):
+                analysis["model_eligibility"] = {
+                    "model_eligibility_version": eligibility.get("model_eligibility_version"),
+                    "snapshot_sha256": eligibility.get("snapshot_sha256"),
+                }
+            progress.update(phase="exporting blinded matched-pair audit")
+            audit_metadata = export_blinded_matched_pairs(
+                db.iter_rows(),
+                audit_path=ws.human_audit,
+                key_path=ws.human_audit_key,
+                schema_path=ws.human_audit_schema,
+            )
+            analysis["human_validation"] = audit_metadata
+            progress.update(
+                completed=work_units,
+                phase="writing analysis.json",
+                detail="",
+            )
+            write_json(ws.analysis, analysis)
+            progress.update(phase="writing report.txt")
+            write_text(ws.report, render_report(analysis))
+            progress.update(phase="writing paper-report.txt")
+            write_text(ws.paper_report, render_paper_report(analysis))
+            progress.update(phase="writing model comparison CSV files")
+            write_text(ws.model_effects, render_model_effects_csv(analysis))
+            write_text(ws.model_effect_summary, render_model_effect_summary_csv(analysis))
+            progress.update(phase="exporting cells and judgments")
+            write_jsonl(ws.cells_export, db.iter_rows())
+            progress.update(phase="exporting attempts")
+            write_jsonl(ws.attempts_export, db.attempts())
+            progress.update(phase="analysis complete", force=True)
+        return analysis
 
 
 def _require_reproduce_generation_ready_for_analysis(ws: Workspace) -> None:
@@ -574,6 +994,7 @@ def command_preflight(args: argparse.Namespace) -> None:
             model_backends=model_backends,
             max_cost=args.max_cost,
             progress_sink=_preflight_progress,
+            load_concurrency=args.load_concurrency,
         )
     print(json.dumps({key: route.to_dict() for key, route in routes.items()}, indent=2))
 
@@ -588,7 +1009,10 @@ def command_run(args: argparse.Namespace) -> None:
 def command_judge(args: argparse.Namespace) -> None:
     ws = _workspace(args)
     with ws.lock():
-        count = _judge_workspace(ws)
+        count = _judge_workspace(
+            ws,
+            idf_source=Path(args.idf_source) if args.idf_source else None,
+        )
     print(f"Wrote or refreshed {count} judgments.")
 
 
@@ -601,12 +1025,12 @@ def command_analyze(args: argparse.Namespace) -> None:
             bootstraps=args.bootstraps,
             confidence_level=args.confidence_level,
         )
-    print(render_report(analysis), end="")
+    print(render_paper_report(analysis), end="")
 
 
 def command_status(args: argparse.Namespace) -> None:
     ws = _workspace(args)
-    manifest = ws.require_prepared(require_runtime_environment=False)
+    manifest = ws.require_generation_integrity(require_runtime_environment=False)
     with Database(ws.database) as db:
         output = {
             "manifest_identity_hash": manifest.identity_hash,
@@ -661,6 +1085,12 @@ def command_reproduce(args: argparse.Namespace) -> None:
                 )
             _progress("[2/5] using pinned provider routes")
             pinned_routes, _ = _route_document(ws, prepared_models)
+            route_document = read_json(ws.routes)
+            if isinstance(route_document, dict) and route_document.get("schema_version") == 2:
+                _progress(
+                    "[preflight] pinned routes predate concurrent-load qualification; "
+                    "preserving them for provider continuity and enabling the route-capacity circuit"
+                )
             _report_pinned_routes(pinned_routes)
         else:
             if args.fake:
@@ -678,12 +1108,16 @@ def command_reproduce(args: argparse.Namespace) -> None:
                 model_backends=model_backends,
                 max_cost=args.max_cost,
                 progress_sink=_preflight_progress,
+                load_concurrency=args.per_model_concurrency,
             )
         _progress("[3/5] generating or resuming responses")
         summary = _run_generation(args, ws, progress_sink=_generation_progress)
         _require_reproduce_generation_ready_for_analysis(ws)
         _progress("[4/5] applying deterministic judgments")
-        refreshed = _judge_workspace(ws)
+        refreshed = _judge_workspace(
+            ws,
+            idf_source=Path(args.idf_source) if args.idf_source else None,
+        )
         _progress(f"[4/5] judgments written or refreshed: {refreshed}")
         _progress("[5/5] analyzing and exporting results")
         analysis = _analyze_workspace(
@@ -693,7 +1127,7 @@ def command_reproduce(args: argparse.Namespace) -> None:
             confidence_level=args.confidence_level,
         )
     LOGGER.info("generation=%s judgments_refreshed=%d", summary, refreshed)
-    print(render_report(analysis), end="")
+    print(render_paper_report(analysis), end="")
 
 
 def _add_workspace(command: argparse.ArgumentParser) -> None:
@@ -705,6 +1139,16 @@ def _add_selection(command: argparse.ArgumentParser) -> None:
     command.add_argument("--datasets", nargs="+", default=list(DEFAULT_DATASETS))
     command.add_argument("--seed", type=int, default=DEFAULT_SEED)
     command.add_argument("--input-jsonl")
+    command.add_argument(
+        "--exclude-workspace",
+        action="append",
+        default=[],
+        metavar="WORKSPACE",
+        help=(
+            "exclude questions already selected in a previous workspace; repeat for "
+            "multiple prior runs (older workspace layouts are accepted)"
+        ),
+    )
     command.add_argument("--models", nargs="*")
 
 
@@ -720,6 +1164,17 @@ def _add_generation(command: argparse.ArgumentParser) -> None:
         help="additional retry rounds for transient provider failures",
     )
     command.add_argument("--fake", action="store_true", help=argparse.SUPPRESS)
+
+
+def _add_idf_source(command: argparse.ArgumentParser) -> None:
+    command.add_argument(
+        "--idf-source",
+        metavar="YEARLY-COUNTS.CSV.GZ",
+        help=(
+            "use a local copy of the pinned PubMed document-frequency table instead of "
+            "the verified download cache"
+        ),
+    )
 
 
 def _add_analysis(command: argparse.ArgumentParser) -> None:
@@ -745,6 +1200,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_workspace(reproduce)
     _add_selection(reproduce)
     _add_generation(reproduce)
+    _add_idf_source(reproduce)
     _add_analysis(reproduce)
     reproduce.add_argument("--preflight-timeout", type=_positive_float, default=90.0)
     reproduce.add_argument("--backend", choices=("auto", "hf", "openrouter"), default="auto")
@@ -760,6 +1216,8 @@ def build_parser() -> argparse.ArgumentParser:
     prepare = commands.add_parser("prepare", help="prepare an immutable factorial plan")
     _add_workspace(prepare)
     _add_selection(prepare)
+    _add_idf_source(prepare)
+    prepare.add_argument("--fake", action="store_true", help=argparse.SUPPRESS)
     prepare.set_defaults(handler=command_prepare)
 
     preflight = commands.add_parser("preflight", help="probe and pin provider routes")
@@ -774,6 +1232,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="override one model's automatic backend preference (hf or openrouter)",
     )
     preflight.add_argument("--max-cost", type=_positive_float)
+    preflight.add_argument("--load-concurrency", type=_positive_int, default=8)
     preflight.add_argument("--fake", action="store_true", help=argparse.SUPPRESS)
     preflight.set_defaults(handler=command_preflight)
 
@@ -788,6 +1247,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     judge_parser = commands.add_parser("judge", help="apply current deterministic measurements")
     _add_workspace(judge_parser)
+    _add_idf_source(judge_parser)
     judge_parser.set_defaults(handler=command_judge)
 
     analyze = commands.add_parser("analyze", help="compute versioned contrasts and exports")
@@ -798,8 +1258,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    effective_argv = list(sys.argv[1:] if argv is None else argv)
+    if effective_argv and effective_argv[0].isdigit():
+        effective_argv.insert(0, "reproduce")
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(effective_argv)
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO if args.verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",

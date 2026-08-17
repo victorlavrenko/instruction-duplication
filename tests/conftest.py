@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from instruction_duplication.lexical import build_reference
+from instruction_duplication.lexical import build_reference, compile_reference
 from instruction_duplication.types import Question
 
 
@@ -30,7 +30,7 @@ def question() -> Question:
 
 @pytest.fixture
 def lexical_reference(question: Question):
-    return build_reference([question])
+    return compile_reference(build_reference([question]))
 
 
 @pytest.fixture

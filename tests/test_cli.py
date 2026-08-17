@@ -8,6 +8,8 @@ import pytest
 
 from instruction_duplication import cli
 from instruction_duplication.cli import main
+from instruction_duplication.preflight import PreflightResult
+from instruction_duplication.provider import Route
 
 
 def run_args(workspace: Path, input_path: Path, seed: int = 7):
@@ -39,19 +41,33 @@ def test_network_free_end_to_end_and_resume(tmp_path: Path, local_jsonl: Path):
     expected = {
         workspace / "manifest.json",
         workspace / "config" / "models.json",
+        workspace / "config" / "model-eligibility.json",
         workspace / "config" / "environment.json",
         workspace / "config" / "routes.json",
         workspace / "config" / "preflight.json",
         workspace / "data" / "questions.jsonl",
         workspace / "data" / "dataset-audit.json",
         workspace / "data" / "lexical-reference.json",
+        workspace / "data" / "fact-inventory.jsonl",
+        workspace / "data" / "question-qc.jsonl",
+        workspace / "data" / "generation-schedule.json",
         workspace / "state" / "run.sqlite3",
         workspace / "results" / "analysis.json",
         workspace / "results" / "report.txt",
+        workspace / "results" / "paper-report.txt",
+        workspace / "results" / "model-effect-summary.csv",
+        workspace / "results" / "model-effects.csv",
         workspace / "results" / "cells-and-judgments.jsonl",
         workspace / "results" / "attempts.jsonl",
+        workspace / "results" / "blinded-matched-pair-audit.jsonl",
+        workspace / "results" / "blinded-matched-pair-key.jsonl",
+        workspace / "results" / "human-audit-schema.json",
     }
     assert all(path.is_file() for path in expected)
+    routes = json.loads((workspace / "config" / "routes.json").read_text())
+    assert routes["schema_version"] == 3
+    assert routes["preflight_policy"] == "concurrent-load-v1"
+    assert routes["load_concurrency"] == 8
     attempts_path = workspace / "results" / "attempts.jsonl"
     attempts_before = attempts_path.read_text().count("\n")
     assert attempts_before == 16
@@ -72,9 +88,10 @@ def test_changed_seed_is_rejected_on_resume(tmp_path: Path, local_jsonl: Path):
     assert exc.value.code == 3
 
 
-def test_explicit_subcommand_is_required():
-    with pytest.raises(SystemExit):
-        main(["1"])
+def test_question_count_is_a_reproduce_shorthand():
+    with pytest.raises(SystemExit) as exc:
+        main(["1", "--help"])
+    assert exc.value.code == 0
 
 
 def test_cli_rejects_nan_cost(tmp_path: Path):
@@ -122,7 +139,11 @@ def test_reproduce_reports_concise_pipeline_progress(tmp_path: Path, local_jsonl
     assert "[generation] 16/16 (100%), completed=16" in captured.err
     assert "cells/min, ETA=0s" in captured.err
     assert "[4/5] applying deterministic judgments" in captured.err
+    assert "[judge]" in captured.err
+    assert "judgments persisted" in captured.err
     assert "[5/5] analyzing and exporting results" in captured.err
+    assert "[analysis]" in captured.err
+    assert "analysis complete" in captured.err
 
 
 def test_reproduce_analyzes_exhausted_retryable_cells(
@@ -168,3 +189,34 @@ def test_reproduce_reports_pinned_routes_on_resume(tmp_path: Path, local_jsonl: 
     assert "[1/5] using the existing prepared workspace" in captured.err
     assert "[2/5] using pinned provider routes" in captured.err
     assert "[routes] gemma-3-12b: fake/fake" in captured.err
+
+
+def test_preflight_cannot_change_provider_after_generation(
+    monkeypatch, tmp_path: Path, local_jsonl: Path
+):
+    workspace = tmp_path / "provider-continuity"
+    main(run_args(workspace, local_jsonl))
+
+    async def changed_route(*args: object, **kwargs: object) -> PreflightResult:
+        del args, kwargs
+        return PreflightResult(
+            {
+                "gemma-3-12b": Route(
+                    "fake",
+                    "different-provider",
+                    "gemma-3-12b",
+                    0.0,
+                    0.0,
+                    16,
+                    "test",
+                    True,
+                )
+            },
+            {"status": "completed"},
+            (),
+        )
+
+    monkeypatch.setattr(cli, "check_routes", changed_route)
+    with pytest.raises(SystemExit) as captured:
+        main(["preflight", "--workspace", str(workspace), "--fake"])
+    assert captured.value.code == 3

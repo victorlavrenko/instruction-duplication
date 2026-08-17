@@ -12,9 +12,11 @@ from instruction_duplication.provider import (
     estimate_prompt_tokens,
     fake_response,
     headers,
+    http_error_payload,
     idempotency_key,
     normalize_routes,
     parse_response,
+    rate_limit_source,
     realized_cost,
     reasoning_field,
     request_payload,
@@ -112,11 +114,32 @@ def test_retry_after_http_date_or_seconds():
         headers={"Retry-After": "Sun, 06 Nov 1994 08:49:37 GMT"},
     )
     exc = httpx.HTTPStatusError("rate", request=request, response=response)
-    assert retry_delay(exc, 0, "key") == 0
+    assert 1 <= retry_delay(exc, 0, "key") <= 1.5
 
     response = httpx.Response(429, request=request, headers={"Retry-After": "not-a-date"})
     exc = httpx.HTTPStatusError("rate", request=request, response=response)
     assert retry_delay(exc, 0, "key") == retry_delay(exc, 0, "key")
+
+
+def test_rate_limit_provenance_is_explicit_and_conservative():
+    model = MODEL_BY_ID["gemma-3-12b"]
+    selected = route(model)
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    upstream = httpx.Response(
+        429,
+        request=request,
+        json={"error": {"metadata": {"provider_name": "DeepInfra"}}},
+    )
+    payload = http_error_payload(upstream)
+    assert payload == {"error": {"metadata": {"provider_name": "DeepInfra"}}}
+    assert rate_limit_source(selected, upstream, payload) == "upstream:DeepInfra"
+
+    router = httpx.Response(429, request=request, headers={"X-OpenRouter-Error": "rate-limit"})
+    assert rate_limit_source(selected, router, None) == "openrouter"
+
+    unknown = httpx.Response(429, request=request, text="too many requests")
+    assert http_error_payload(unknown) is None
+    assert rate_limit_source(selected, unknown, None) == "unknown-via-openrouter"
 
 
 def test_headers_have_configurable_project_attribution(monkeypatch):
@@ -156,6 +179,8 @@ def test_reasoning_indicators_and_cost_fallback(question):
         100 * selected.input_usd_per_million + 50 * selected.output_usd_per_million
     ) / 1_000_000
     assert realized_cost(selected, usage, 0.25) == pytest.approx(expected)
+    zero_reported = type(parsed)(parsed.content, 100, 50, 0.0, None, "stop", None)
+    assert realized_cost(selected, zero_reported, 0.25) == pytest.approx(expected)
 
 
 def test_response_rejects_invalid_usage_and_empty_content():

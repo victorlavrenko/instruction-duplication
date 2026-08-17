@@ -6,7 +6,7 @@ import hashlib
 import json
 import sqlite3
 import threading
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Generator, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from types import TracebackType
@@ -15,7 +15,7 @@ from typing import TypedDict
 from .io_utils import canonical_json, sha256_bytes
 from .json_types import JsonObject, json_object, object_value
 from .manifest import JUDGE_VERSION, MANIFEST_SCHEMA_VERSION
-from .protocol import CONDITIONS, PROTOCOL_HASH
+from .protocol import CONDITIONS
 from .records import (
     AnalysisRow,
     AttemptFinished,
@@ -25,6 +25,7 @@ from .records import (
     GenerationEvent,
     JudgmentWrite,
 )
+from .schedule import schedule_key
 from .types import AttemptStatus, CellStatus, Question
 
 
@@ -236,7 +237,7 @@ class Database:
             self._conn.close()
 
     @contextmanager
-    def transaction(self) -> Iterator[sqlite3.Connection]:
+    def transaction(self) -> Generator[sqlite3.Connection, None, None]:
         """Run a group of statements atomically with rollback on failure."""
         with self._lock:
             try:
@@ -362,11 +363,12 @@ class Database:
           FROM cells c JOIN questions q ON q.id=c.question_id
           WHERE c.status IN ('pending','retryable','budget_blocked')
             AND c.model_id IN ({placeholders})
-          ORDER BY c.model_id,c.question_id,c.condition_id
         """
         with self._lock:
             rows = self._conn.execute(query, tuple(model_ids)).fetchall()
-        return [self._decode_generation_row(row) for row in rows]
+        cells = [self._decode_generation_row(row) for row in rows]
+        cells.sort(key=lambda cell: schedule_key(cell.cell_id))
+        return cells
 
     def representative_cell(self) -> GenerationCell:
         """Load the longest instructed prompt candidate for preflight."""
@@ -466,6 +468,23 @@ class Database:
                             "DELETE FROM judgments WHERE cell_id=?",
                             (final.cell_id,),
                         )
+                        # Never let an empty provider/transport exception string turn a
+                        # retryable or failed cell into an invalid SQLite row.  The normal
+                        # generation path supplies a useful diagnostic; this fallback is the
+                        # persistence boundary's last line of defence against opaque third-
+                        # party exceptions and future classifier regressions.
+                        final_error = (final.error or "").strip()
+                        if (
+                            final.status
+                            in {
+                                CellStatus.FAILED,
+                                CellStatus.RETRYABLE,
+                                CellStatus.TRUNCATED,
+                                CellStatus.REFUSED,
+                            }
+                            and not final_error
+                        ):
+                            final_error = f"{final.status.value}: no error detail supplied"
                         cursor = connection.execute(
                             """
                             UPDATE cells SET status=?,provider=?,content=?,error=?,input_tokens=?,
@@ -476,7 +495,7 @@ class Database:
                                 final.status.value,
                                 final.provider,
                                 final.content,
-                                final.error[:4000] if final.error else None,
+                                final_error[:4000] if final_error else None,
                                 final.input_tokens,
                                 final.output_tokens,
                                 final.latency_seconds,
@@ -501,6 +520,7 @@ class Database:
         self,
         *,
         lexical_version: str,
+        generation_protocol_hash: str,
     ) -> list[JudgmentTarget]:
         """Return cells whose stored judgment is missing or version/content-stale."""
         query = """
@@ -520,7 +540,7 @@ class Database:
             content_hash = sha256_bytes((str(row["status"]) + "\0" + content).encode("utf-8"))
             current = (
                 row["judge_version"] == JUDGE_VERSION
-                and row["protocol_hash"] == PROTOCOL_HASH
+                and row["protocol_hash"] == generation_protocol_hash
                 and row["lexical_version"] == lexical_version
                 and row["content_hash"] == content_hash
             )
@@ -562,6 +582,7 @@ class Database:
         rows: Sequence[JudgmentWrite],
         *,
         lexical_version: str,
+        generation_protocol_hash: str,
     ) -> None:
         """Batch upsert current-version judgments in one transaction."""
         if not rows:
@@ -585,7 +606,7 @@ class Database:
                     (
                         item.cell_id,
                         JUDGE_VERSION,
-                        PROTOCOL_HASH,
+                        generation_protocol_hash,
                         lexical_version,
                         item.content_hash,
                         canonical_json(item.judgment),

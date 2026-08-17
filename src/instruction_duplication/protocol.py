@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from html import escape
 from typing import TypedDict
 
 from .io_utils import sha256_json
@@ -18,25 +17,59 @@ class ChatMessage(TypedDict):
     content: str
 
 
-PROTOCOL = """Your entire response must be exactly one XML document. The first characters must be <response>, and nothing may appear before or after that document. Do not use Markdown fences. XML-escape &, <, and > when they occur in text. Do not state, guess, or imply a preferred answer before <provisional_answer>.
+SECTION_GUIDANCE: dict[str, str] = {
+    "facts": (
+        "Discuss every important fact in the question, including relevant timing, laterality, "
+        "negation, measurements, and qualifiers."
+    ),
+    "implications": (
+        "Explain what the facts support or argue against and how they distinguish the answer "
+        "choices."
+    ),
+    "provisional_answer": "Select the best answer and explain why.",
+    "second_best": (
+        "Select a different answer as the best alternative and explain why it is less suitable."
+    ),
+    "decisive_fact": (
+        "Identify the fact that best distinguishes the provisional answer from the best "
+        "alternative."
+    ),
+    "answer_changing_change": (
+        "Describe the smallest change to the question that would make the best alternative the "
+        "best answer, and explain why."
+    ),
+    "rereasoning": (
+        "Reconsider the provisional answer using the original facts. State whether you retain "
+        "or revise it, and explain why."
+    ),
+    "final_answer": "State the selected option and its answer text.",
+}
 
-Use every element below exactly once and in this order. Replace X and Y with option labels; Y must differ from X. Replace the rereasoning decision with exactly retain or revise. Keep every element substantive and non-empty. The final_answer body must be exactly the selected answer text.
+ROLE_TITLES: dict[str, str] = {
+    "facts": "Facts",
+    "implications": "Implications",
+    "provisional_answer": "Provisional answer",
+    "second_best": "Best alternative",
+    "decisive_fact": "Decisive distinction",
+    "answer_changing_change": "What would change the answer",
+    "rereasoning": "Reconsideration",
+    "final_answer": "Final answer",
+}
 
-<response>
-  <facts>Discuss every important fact stated in the stem, preserving timing, laterality, negation, measurements, and other qualifiers. Do not select an answer.</facts>
-  <implications>Explain what those facts support or argue against and which facts distinguish the choices. Do not select an answer.</implications>
-  <provisional_answer option="X">State one provisional answer and why it currently appears best.</provisional_answer>
-  <contrastive_check>
-    <second_best option="Y">State the second-best answer and why it loses under the actual stem.</second_best>
-    <decisive_fact>State the actual stem fact that most strongly separates X from Y.</decisive_fact>
-    <answer_changing_change>State the smallest substantive stem change that would make Y the best answer, and why.</answer_changing_change>
-  </contrastive_check>
-  <rereasoning decision="retain">Check the provisional answer against every important fact and the contrastive change. Use retain if the final answer is unchanged and revise if it changes; identify the decisive fact.</rereasoning>
-  <final_answer option="X">Exact answer text</final_answer>
-</response>"""
+PROTOCOL = "\n".join(
+    (
+        "Use the following eight headings, in order, to answer the question. Complete every "
+        "section. Do not select an answer before the Provisional answer section.",
+        "",
+        *(
+            f"{index}. {ROLE_TITLES[tag]} — {SECTION_GUIDANCE[tag]}"
+            for index, tag in enumerate(SECTION_GUIDANCE, start=1)
+        ),
+    )
+)
 
 NEUTRAL_SYSTEM = (
-    "Answer the multiple-choice question accurately. Follow any output protocol that is provided."
+    "Answer the multiple-choice question accurately and follow the user's instructions."
 )
 BASELINE_REQUEST = "Reason through the question and give your final answer."
 
@@ -80,11 +113,10 @@ PROTOCOL_HASH = sha256_json({"protocol": PROTOCOL, "conditions": [c.to_dict() fo
 
 
 def format_question(stem: str, choices: Mapping[str, str]) -> str:
-    """Render a multiple-choice question in a deterministic XML wrapper."""
-    lines = ["<question>", "  <stem>", escape(stem.strip()), "  </stem>", "  <choices>"]
+    """Render a multiple-choice question in a deterministic plain-text wrapper."""
+    lines = ["Question", stem.strip(), "", "Answer choices"]
     for label, text in choices.items():
-        lines.append(f'    <choice option="{escape(str(label))}">{escape(str(text))}</choice>')
-    lines.extend(["  </choices>", "</question>"])
+        lines.append(f"{label}. {text.strip()}")
     return "\n".join(lines)
 
 

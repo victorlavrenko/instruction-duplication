@@ -7,6 +7,7 @@ import pytest
 
 from instruction_duplication.lexical import LEXICAL_VERSION
 from instruction_duplication.models import MODEL_BY_ID
+from instruction_duplication.protocol import PROTOCOL_HASH
 from instruction_duplication.records import (
     AttemptFinished,
     AttemptRecord,
@@ -89,7 +90,9 @@ def test_judgment_staleness_includes_status(tmp_path: Path, question):
     model = MODEL_BY_ID["gemma-3-12b"]
     with Database(tmp_path / "run.sqlite3") as db:
         db.prepare([question], [model.id])
-        targets = db.judgment_targets(lexical_version=LEXICAL_VERSION)
+        targets = db.judgment_targets(
+            lexical_version=LEXICAL_VERSION, generation_protocol_hash=PROTOCOL_HASH
+        )
         first = targets[0]
         now = "2026-08-05T00:00:00+00:00"
         db.put_judgments(
@@ -103,11 +106,24 @@ def test_judgment_staleness_includes_status(tmp_path: Path, question):
                 )
             ],
             lexical_version=LEXICAL_VERSION,
+            generation_protocol_hash=PROTOCOL_HASH,
         )
-        assert len(db.judgment_targets(lexical_version=LEXICAL_VERSION)) == 7
+        assert (
+            len(
+                db.judgment_targets(
+                    lexical_version=LEXICAL_VERSION, generation_protocol_hash=PROTOCOL_HASH
+                )
+            )
+            == 7
+        )
         db.mark_running(first["cell_id"], now)
         # Same empty content but changed status must invalidate the judgment.
-        ids = {row["cell_id"] for row in db.judgment_targets(lexical_version=LEXICAL_VERSION)}
+        ids = {
+            row["cell_id"]
+            for row in db.judgment_targets(
+                lexical_version=LEXICAL_VERSION, generation_protocol_hash=PROTOCOL_HASH
+            )
+        }
         assert first["cell_id"] in ids
 
 
@@ -117,3 +133,59 @@ def test_schema_version_is_explicit(tmp_path: Path):
             "SELECT value FROM metadata WHERE key='database_schema_version'"
         ).fetchone()
         assert int(row["value"]) == DATABASE_SCHEMA_VERSION
+
+
+def test_storage_defensively_fills_blank_error_for_retryable_cell(tmp_path: Path, question):
+    model = MODEL_BY_ID["gemma-3-12b"]
+    now = "2026-08-13T00:00:00+00:00"
+    with Database(tmp_path / "run.sqlite3") as db:
+        db.prepare([question], [model.id])
+        cell = db.pending([model.id])[0]
+        attempt = AttemptRecord(
+            request_key="blank-network-error",
+            phase="generation",
+            cell_id=cell.cell_id,
+            model_id=model.id,
+            attempt_number=1,
+            backend="fake",
+            provider="fake",
+            routed_model=model.id,
+            status=AttemptStatus.NETWORK_ERROR,
+            idempotency_key="blank-network-error-idempotency",
+            requested_max_tokens=100,
+            reservation_usd=0.0,
+            reported_cost_usd=None,
+            accounted_cost_usd=0.0,
+            input_tokens=None,
+            output_tokens=None,
+            http_status=None,
+            finish_reason=None,
+            latency_seconds=0.1,
+            error="",
+            raw_response_json=None,
+            started_at=now,
+            completed_at=now,
+        )
+        completion = CellCompletion(
+            cell_id=cell.cell_id,
+            status=CellStatus.RETRYABLE,
+            provider="fake",
+            content=None,
+            error="",
+            input_tokens=None,
+            output_tokens=None,
+            latency_seconds=0.1,
+            raw_response_json=None,
+            completed_at=now,
+        )
+        db.apply_generation_events(
+            [
+                CellStarted(cell_id=cell.cell_id, started_at=now),
+                AttemptFinished(attempt=attempt, final=completion),
+            ]
+        )
+        row = db._conn.execute(
+            "SELECT status,error FROM cells WHERE cell_id=?", (cell.cell_id,)
+        ).fetchone()
+        assert row["status"] == "retryable"
+        assert row["error"] == "retryable: no error detail supplied"

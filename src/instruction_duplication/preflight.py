@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -15,7 +16,6 @@ from urllib.parse import quote
 import httpx
 from huggingface_hub import model_info
 
-from .answer_utils import extract_answer
 from .json_types import (
     FrozenJsonObject,
     JsonArray,
@@ -25,7 +25,6 @@ from .json_types import (
     json_object,
     object_value,
 )
-from .judge import extract_protocol_final_answer, parse_protocol
 from .models import Model
 from .provider import (
     SAFETY_REASONS,
@@ -36,9 +35,11 @@ from .provider import (
     estimate_cost,
     headers,
     hf_token,
+    http_error_payload,
     idempotency_key,
     openrouter_token,
     parse_response,
+    rate_limit_source,
     realized_cost,
     reasoning_field,
     request_payload,
@@ -47,6 +48,7 @@ from .provider import (
     route_url,
 )
 from .records import AttemptRecord, GenerationCell
+from .trajectory import recover_protocol
 from .types import AttemptStatus
 
 type BackendPreference = Literal["auto", "hf", "openrouter"]
@@ -59,6 +61,7 @@ type PreflightProgressStatus = Literal[
     "discovery_failed",
 ]
 _ALLOWED_HF_TASKS = {"conversational", "text-generation", "image-text-to-text"}
+_PREFLIGHT_TRANSPORT_RETRIES = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,15 +148,18 @@ class PreflightBudget:
 
     cap: float
     committed: float = 0.0
+    reserved: float = 0.0
 
     def authorize(self, reservation: float) -> None:
-        if self.committed + reservation > self.cap + 1e-12:
+        if self.committed + self.reserved + reservation > self.cap + 1e-12:
             raise PreflightBudgetExceeded(
                 "preflight cost cap would be exceeded: "
-                f"${self.committed + reservation:.6f} > ${self.cap:.6f}"
+                f"${self.committed + self.reserved + reservation:.6f} > ${self.cap:.6f}"
             )
+        self.reserved += reservation
 
-    def commit(self, actual: float) -> None:
+    def commit(self, reservation: float, actual: float) -> None:
+        self.reserved = max(0.0, self.reserved - reservation)
         self.committed += actual
         if self.committed > self.cap + 1e-9:
             raise PreflightBudgetExceeded(
@@ -302,6 +308,7 @@ def _probe_error_state(
 
 def _probe_attempt_record(
     *,
+    preflight_run_id: str,
     model: Model,
     route: Route,
     probe_index: int,
@@ -321,7 +328,12 @@ def _probe_attempt_record(
     input_tokens: int | None = None
     output_tokens: int | None = None
     finish: str | None = None
-    if parsed is not None:
+    if response is not None and response.status_code == 429 and parsed is None:
+        # An explicit rate-limit rejection did not execute the inference request. This
+        # mirrors generation accounting and prevents transient back-pressure from
+        # exhausting the user's experiment cost cap.
+        accounted = 0.0
+    elif parsed is not None:
         reported = parsed.reported_cost_usd
         input_tokens = parsed.input_tokens
         output_tokens = parsed.output_tokens
@@ -329,7 +341,7 @@ def _probe_attempt_record(
         accounted = realized_cost(route, parsed, reservation)
     return AttemptRecord(
         request_key=(
-            f"preflight:{model.id}:{route.backend}:{route.provider}:"
+            f"preflight:{preflight_run_id}:{model.id}:{route.backend}:{route.provider}:"
             f"probe-{probe_index}:attempt-{attempt_number}"
         ),
         phase="preflight",
@@ -361,7 +373,6 @@ def _validate_probe_response(
     parsed: ProviderResponse,
     raw: JsonObject,
     model: Model,
-    cell: GenerationCell,
     route: Route,
 ) -> tuple[str, str | None]:
     reasoning = reasoning_field(raw, parsed.content)
@@ -380,15 +391,10 @@ def _validate_probe_response(
             AttemptStatus.REFUSED,
             parsed.refusal or f"blocked: {parsed.finish_reason}",
         )
-    answer = (
-        extract_answer(parsed.content, cell.choices)
-        if cell.condition_id == "zero"
-        else extract_protocol_final_answer(parsed.content, cell.choices)
-    )
-    if answer.status != "parsed" or answer.option is None:
+    if parsed.finish_reason != "stop":
         raise ProbeValidationError(
             AttemptStatus.INVALID_RESPONSE,
-            f"probe has no parseable final answer: {answer.status}",
+            f"provider returned non-success finish_reason={parsed.finish_reason!r}",
         )
     returned_provider = parsed.provider
     if (
@@ -443,15 +449,19 @@ async def _probe_route(
     cell: GenerationCell,
     route: Route,
     *,
-    transport_retries: int = 2,
+    transport_retries: int = _PREFLIGHT_TRANSPORT_RETRIES,
     probe_index: int = 1,
     budget: PreflightBudget | None = None,
     attempt_sink: AttemptSink | None = None,
+    preflight_run_id: str | None = None,
 ) -> ProbeResult:
     """Probe one route at the empirical request ceiling; never retry truncation."""
+    run_id = preflight_run_id or uuid.uuid4().hex
     payload = request_payload(model, cell, route)
     reservation = estimate_cost(route, payload) * 1.10
-    request_id = f"preflight:{model.id}:{route.backend}:{route.provider}:{probe_index}"
+    request_id = (
+        f"preflight:{run_id}:{model.id}:{route.backend}:{route.provider}:{probe_index}"
+    )
     logical_key = idempotency_key(request_id, "preflight")
     attempts: list[AttemptRecord] = []
     for attempt_number in range(1, transport_retries + 2):
@@ -478,15 +488,20 @@ async def _probe_route(
             decoded_response: object = response.json()
             raw = json_object(decoded_response, path="provider response")
             parsed = parse_response(raw)
-            success_content, returned_provider = _validate_probe_response(
-                parsed, raw, model, cell, route
-            )
+            success_content, returned_provider = _validate_probe_response(parsed, raw, model, route)
             status = AttemptStatus.COMPLETED
         except Exception as exc:
             caught = exc
             error = str(exc)
+            if isinstance(exc, httpx.HTTPStatusError):
+                response = exc.response
+                raw = http_error_payload(response)
+                if response.status_code == 429:
+                    source = rate_limit_source(route, response, raw)
+                    error = f"{error}; rate_limit_source={source}"
             status, retryable = _probe_error_state(exc, status)
         record = _probe_attempt_record(
+            preflight_run_id=run_id,
             model=model,
             route=route,
             probe_index=probe_index,
@@ -505,7 +520,7 @@ async def _probe_route(
         if attempt_sink is not None:
             attempt_sink((record,))
         if budget is not None:
-            budget.commit(record.accounted_cost_usd)
+            budget.commit(reservation, record.accounted_cost_usd)
         if success_content is not None:
             return ProbeResult(success_content, tuple(attempts), returned_provider)
         if not retryable or attempt_number > transport_retries:
@@ -532,6 +547,8 @@ class PreflightSession:
     model_backends: Mapping[str, LiveBackend]
     representative_cell: GenerationCell
     timeout_seconds: float
+    load_concurrency: int
+    preflight_run_id: str
     clients: dict[LiveBackend, httpx.AsyncClient] = field(default_factory=_empty_clients)
     attempts: list[AttemptRecord] = field(default_factory=_empty_attempts)
     budget: PreflightBudget | None = None
@@ -589,44 +606,91 @@ class PreflightSession:
         model: Model,
         candidate: Route,
     ) -> tuple[Route, JsonObject]:
-        """Probe a candidate twice and return a pinned route plus provenance row."""
+        """Verify function twice, then require a simultaneous full-load probe batch."""
         client = await self.client_for(candidate)
-        first = await _probe_route(
-            client,
-            model,
-            self.representative_cell,
-            candidate,
-            probe_index=1,
-            budget=self.budget,
-            attempt_sink=self.attempt_sink,
-        )
-        self.attempts.extend(first.attempts)
-        second = await _probe_route(
-            client,
-            model,
-            self.representative_cell,
-            candidate,
-            probe_index=2,
-            budget=self.budget,
-            attempt_sink=self.attempt_sink,
-        )
-        self.attempts.extend(second.attempts)
-        deterministic = first.content == second.content
+        candidate_attempts: list[AttemptRecord] = []
+        results: list[ProbeResult] = []
+        try:
+            for probe_index in (1, 2):
+                result = await _probe_route(
+                    client,
+                    model,
+                    self.representative_cell,
+                    candidate,
+                    probe_index=probe_index,
+                    budget=self.budget,
+                    attempt_sink=self.attempt_sink,
+                    preflight_run_id=self.preflight_run_id,
+                )
+                candidate_attempts.extend(result.attempts)
+                results.append(result)
+
+            capacity = min(self.load_concurrency, candidate.max_concurrency)
+            capacity_results = await asyncio.gather(
+                *(
+                    _probe_route(
+                        client,
+                        model,
+                        self.representative_cell,
+                        candidate,
+                        transport_retries=0,
+                        probe_index=3 + index,
+                        budget=self.budget,
+                        attempt_sink=self.attempt_sink,
+                        preflight_run_id=self.preflight_run_id,
+                    )
+                    for index in range(capacity)
+                ),
+                return_exceptions=True,
+            )
+            failures: list[str] = []
+            for index, capacity_result in enumerate(capacity_results):
+                if isinstance(capacity_result, ProbeResult):
+                    candidate_attempts.extend(capacity_result.attempts)
+                    results.append(capacity_result)
+                    continue
+                if isinstance(capacity_result, ProbeFailure):
+                    candidate_attempts.extend(capacity_result.attempts)
+                    failures.append(f"slot {index + 1}: {capacity_result}")
+                    continue
+                if isinstance(capacity_result, PreflightBudgetExceeded):
+                    raise capacity_result
+                failures.append(f"slot {index + 1}: {capacity_result}")
+            if failures:
+                raise ProbeFailure(
+                    f"capacity test failed ({capacity - len(failures)}/{capacity} succeeded): "
+                    + "; ".join(failures),
+                    candidate_attempts,
+                )
+        except ProbeFailure as exc:
+            if exc.attempts == tuple(candidate_attempts):
+                raise
+            raise ProbeFailure(str(exc), candidate_attempts + list(exc.attempts)) from exc
+
+        first, second = results[:2]
+        deterministic = len({result.content for result in results}) == 1
         protocol_observations: JsonArray = []
         if self.representative_cell.condition_id != "zero":
             for content in (first.content, second.content):
-                protocol = parse_protocol(content, self.representative_cell.choices)
+                protocol = recover_protocol(content, self.representative_cell.choices)
                 protocol_observations.append(
                     json_object(
                         {
-                            "xml_valid": protocol.xml_valid,
-                            "structure_valid": protocol.structure_valid,
+                            "roles_once": all(
+                                count == 1 for count in protocol.semantic_start_counts.values()
+                            ),
+                            "roles_in_order": protocol.semantic_ordered_starts,
+                            "reasoning_content_nonempty": all(
+                                text
+                                for tag, text in protocol.sections.items()
+                                if tag != "final_answer"
+                            ),
                             "errors": list(protocol.errors),
                         },
                         path="preflight.protocol_observation",
                     )
                 )
-        calibrated = _calibrate_route(candidate, first.attempts + second.attempts)
+        calibrated = _calibrate_route(candidate, candidate_attempts)
         selected = Route(
             backend=calibrated.backend,
             provider=calibrated.provider,
@@ -643,11 +707,15 @@ class PreflightSession:
             "result": "selected",
             "determinism_verified": deterministic,
             "returned_provider": second.returned_provider,
+            "functional_probes_succeeded": 2,
+            "capacity_test_concurrency": capacity,
+            "capacity_test_succeeded": capacity,
             "pricing_source": selected.pricing_source,
             "input_usd_per_million": selected.input_usd_per_million,
             "output_usd_per_million": selected.output_usd_per_million,
             "protocol_observations": protocol_observations,
         }
+        self.attempts.extend(candidate_attempts)
         return selected, row
 
     async def select_model(self, model: Model) -> tuple[Route, list[JsonObject]]:
@@ -721,7 +789,13 @@ class PreflightSession:
                     "selected",
                     provider=provider,
                     detail=(
-                        "deterministic" if selected.determinism_verified else "non-identical probes"
+                        (
+                            "deterministic"
+                            if selected.determinism_verified
+                            else "non-identical probes"
+                        )
+                        + f"; load {row['capacity_test_succeeded']}/"
+                        f"{row['capacity_test_concurrency']}"
                     ),
                 )
                 candidate_rows.append(row)
@@ -769,26 +843,36 @@ async def check_routes(
     committed_cost: float = 0.0,
     attempt_sink: AttemptSink | None = None,
     progress_sink: PreflightProgressSink | None = None,
+    load_concurrency: int = 8,
 ) -> PreflightResult:
-    """Find, verify twice, and pin one route per model with full provenance."""
+    """Find and pin routes that also sustain the intended simultaneous model load."""
+    if load_concurrency < 1:
+        raise ValueError("load_concurrency must be positive")
     if fake:
-        routes = {
+        fake_routes = {
             model.id: Route("fake", "fake", model.id, 0.0, 0.0, model.max_concurrency, "fake", True)
             for model in models
         }
         return PreflightResult(
-            routes,
-            {"backend_policy": "fake", "models": {}},
+            fake_routes,
+            {
+                "backend_policy": "fake",
+                "capacity_test_concurrency": load_concurrency,
+                "models": {},
+            },
             (),
         )
     _validate_backend_credentials(backend)
     overrides = _validate_model_backends(models, backend, model_backends)
     budget = None if max_cost is None else PreflightBudget(max_cost, committed_cost)
+    preflight_run_id = uuid.uuid4().hex
     session = PreflightSession(
         backend,
         MappingProxyType(overrides),
         representative_cell,
         timeout_seconds,
+        load_concurrency,
+        preflight_run_id,
         budget=budget,
         attempt_sink=attempt_sink,
         progress_sink=progress_sink,
@@ -820,6 +904,8 @@ async def check_routes(
         "backend_policy": backend,
         "backend_order": backend_orders,
         "representative_cell_id": representative_cell.cell_id,
+        "preflight_run_id": preflight_run_id,
+        "capacity_test_concurrency": load_concurrency,
         "status": "failed" if failure else "completed",
         "error": str(failure) if failure else None,
         "models": provenance,

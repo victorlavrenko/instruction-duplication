@@ -18,6 +18,7 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
+  "numpy>=2.0,<3",
   "httpx>=0.28.1,<1",
   "datasets>=5.0.1,<6",
   "huggingface_hub>=1.26.1,<2",

@@ -13,26 +13,58 @@ from .json_types import object_mapping, object_sequence
 
 LABELS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 LABEL_PATTERN = r"[A-Z]"
+ANSWER_CUE_PATTERN = (
+    r"(?:final\s+answer|answer|best\s+(?:answer|choice)|correct\s+(?:answer|choice|option)|"
+    r"false\s+(?:statement|answer)|diagnosis|response)"
+)
+ANSWER_COPULA_PATTERN = r"(?:is|would\s+be|appears\s+to\s+be|seems\s+to\s+be)?\s*(?:[:=]\s*)?"
 EXPLICIT_OPTION_LABEL_RE = re.compile(
-    rf"\b(?:final\s+answer|answer|correct\s+(?:answer|choice)|choice|option|diagnosis|response)"
-    rf"\s*(?:is|=|:|would\s+be|appears\s+to\s+be|seems\s+to\s+be)?\s*"
+    rf"\b{ANSWER_CUE_PATTERN}\s*{ANSWER_COPULA_PATTERN}"
     rf"option\s*[\[(]?({LABEL_PATTERN})[\])]?(?=\b|\s|[.,;:!?<])",
     re.IGNORECASE,
 )
 EXPLICIT_BARE_LABEL_RE = re.compile(
-    rf"\b(?:final\s+answer|answer|correct\s+(?:answer|choice)|choice|option|diagnosis|response)"
-    rf"\s*(?:is|=|:|would\s+be|appears\s+to\s+be|seems\s+to\s+be)?\s*"
-    rf"[\[(]?({LABEL_PATTERN})[\])]?(?=\b|\s|[.,;:!?<])"
+    rf"\b{ANSWER_CUE_PATTERN}\s*{ANSWER_COPULA_PATTERN}"
+    rf"[\[(]?((?-i:[A-Z]))[\])]?(?=\b|\s|[.,;:!?<])",
+    re.IGNORECASE,
 )
-FINAL_CUE_RE = re.compile(r"\bfinal\s+answer\b", re.IGNORECASE)
-BOXED_RE = re.compile(rf"\\boxed\s*\{{\s*({LABEL_PATTERN})\s*\}}", re.IGNORECASE)
+EXPLICIT_LOWER_BARE_LABEL_RE = re.compile(
+    rf"\b{ANSWER_CUE_PATTERN}\s*{ANSWER_COPULA_PATTERN}"
+    r"(?:\(((?-i:[a-z]))\)|((?-i:[a-z]))[.)]|((?-i:[a-z]))\s*$)",
+    re.IGNORECASE,
+)
+FINAL_ANSWER_CUE_RE = re.compile(r"\bfinal\s+answer\b", re.IGNORECASE)
+LINE_DECISION_CUE_RE = re.compile(
+    r"(?im)^\s*(?:(?:therefore|thus|hence)\s*,?\s*|conclusion\s*:\s*)?"
+    r"(?:the\s+)?(?:answer|best\s+(?:answer|choice)|correct\s+(?:answer|choice|option)|"
+    r"false\s+(?:statement|answer)|most\s+(?:appropriate|accurate|likely)\s+"
+    r"(?:answer|choice|statement|option|diagnosis|management|treatment))\b"
+)
+BOXED_RE = re.compile(rf"\\boxed\s*\{{\s*\(?({LABEL_PATTERN})\)?\s*\}}", re.IGNORECASE)
+XMLISH_OPTION_ATTR_RE = re.compile(
+    rf"<(?:answer|choice|correct_answer)\b[^<>]*\boption\s*=\s*[\"']?"
+    rf"({LABEL_PATTERN})[\"']?[^<>]*>",
+    re.IGNORECASE,
+)
+XMLISH_LABEL_BODY_RE = re.compile(
+    rf"<(?:answer|correct_answer)>\s*\(?({LABEL_PATTERN})\)?\s*</(?:answer|correct_answer)>",
+    re.IGNORECASE,
+)
 TERMINAL_LABEL_RE = re.compile(
     rf"(?:^|\n)\s*(?:final\s+answer\s*[:=]?\s*)?[\[(]?({LABEL_PATTERN})[\])]?[.)]?\s*$",
+    re.IGNORECASE,
+)
+TERMINAL_OPTION_LABEL_RE = re.compile(
+    rf"(?:^|\n)\s*(?:option|choice)\s*[\[(]?({LABEL_PATTERN})[\])]?[.)]?\s*$",
     re.IGNORECASE,
 )
 LEADING_LABELED_CHOICE_RE = re.compile(
     rf"^\s*(?:option\s*)?[\[(]?({LABEL_PATTERN})[\])]?[.):\-]\s*(.+?)\s*$",
     re.IGNORECASE | re.DOTALL,
+)
+TRAILING_LABELED_CHOICE_RE = re.compile(
+    r"\b((?-i:[A-Z]))[.):\-]\s*(.+?)\s*$",
+    re.DOTALL,
 )
 
 
@@ -168,18 +200,18 @@ def canonicalize_choices(value: object) -> dict[str, str]:
                 raise ChoiceNormalizationError("parallel label/text fields must both be arrays")
             if len(labels) != len(texts):
                 raise ChoiceNormalizationError("parallel label/text arrays have different lengths")
-            for label, text in zip(labels, texts, strict=True):
-                _add_choice(result, label, text)
+            for parallel_label, parallel_text in zip(labels, texts, strict=True):
+                _add_choice(result, parallel_label, parallel_text)
             return _ordered(result)
 
         keys = [str(key).strip() for key in mapping]
         numeric = [int(key) for key in keys if key.isdigit()]
         zero_based = bool(numeric and 0 in numeric)
-        for index, (key, text) in enumerate(mapping.items()):
-            label = _parse_label(key, numeric_zero_based=zero_based)
-            if label is None:
-                label = LABELS[index]
-            _add_choice(result, label, text)
+        for index, (key, mapped_text) in enumerate(mapping.items()):
+            mapped_label = _parse_label(key, numeric_zero_based=zero_based)
+            if mapped_label is None:
+                mapped_label = LABELS[index]
+            _add_choice(result, mapped_label, mapped_text)
         return _ordered(result)
 
     sequence = object_sequence(value)
@@ -300,6 +332,9 @@ class ExtractedAnswer:
     candidates: tuple[str, ...]
 
 
+type AnswerCandidate = tuple[int, str, str]
+
+
 def _choice_text_at_start(text: str, choices: Mapping[str, str]) -> str | None:
     normalized = normalize_text(text)
     matches: list[str] = []
@@ -313,48 +348,101 @@ def _choice_text_at_start(text: str, choices: Mapping[str, str]) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
-def extract_answer(
-    text: str,
-    choices: Mapping[str, str],
-    *,
-    allow_terminal_label: bool = True,
-) -> ExtractedAnswer:
-    """Extract an answer from an explicit final region or concise terminal line."""
-    stripped = text.strip()
-    if not stripped:
-        return ExtractedAnswer(None, "unparseable", None, ())
+def _strip_markdown_presentation(text: str) -> str:
+    """Remove common Markdown decoration without changing answer-bearing text."""
+    lines = [re.sub(r"^\s{0,3}#{1,6}\s*", "", line) for line in text.splitlines()]
+    cleaned = "\n".join(lines)
+    return re.sub(r"(?:\*\*|__|~~|`+)", "", cleaned)
 
-    final_cues = list(FINAL_CUE_RE.finditer(stripped))
-    region_start = final_cues[-1].start() if final_cues else 0
-    region = stripped[region_start:]
-    candidates: list[tuple[int, str, str]] = []
-    for pattern in (EXPLICIT_OPTION_LABEL_RE, EXPLICIT_BARE_LABEL_RE, BOXED_RE):
+
+def _answer_region(text: str) -> tuple[str, bool]:
+    decision_cues = [
+        *FINAL_ANSWER_CUE_RE.finditer(text),
+        *LINE_DECISION_CUE_RE.finditer(text),
+    ]
+    region_start = max((match.start() for match in decision_cues), default=0)
+    return text[region_start:], bool(decision_cues)
+
+
+def _explicit_answer_candidates(region: str, choices: Mapping[str, str]) -> list[AnswerCandidate]:
+    candidates: list[AnswerCandidate] = []
+    for match in EXPLICIT_LOWER_BARE_LABEL_RE.finditer(region):
+        raw_label = next(group for group in match.groups() if group is not None)
+        label = raw_label.upper()
+        if label in choices:
+            candidates.append((match.start(), label, match.group(0)))
+
+    for pattern in (
+        EXPLICIT_OPTION_LABEL_RE,
+        EXPLICIT_BARE_LABEL_RE,
+        BOXED_RE,
+        XMLISH_OPTION_ATTR_RE,
+        XMLISH_LABEL_BODY_RE,
+    ):
         for match in pattern.finditer(region):
             label = match.group(1).upper()
             if label in choices:
                 candidates.append((match.start(), label, match.group(0)))
+    return candidates
 
+
+def _decision_line_candidates(region: str, choices: Mapping[str, str]) -> list[AnswerCandidate]:
+    candidates: list[AnswerCandidate] = []
+    offset = 0
+    for line in region.splitlines(keepends=True):
+        visible = line.strip()
+        labeled_line = LEADING_LABELED_CHOICE_RE.match(visible)
+        if labeled_line is not None:
+            label = labeled_line.group(1).upper()
+            if label in choices:
+                body = normalize_text(labeled_line.group(2))
+                expected = normalize_text(choices[label])
+                if body == expected or body.startswith(expected + " "):
+                    candidates.append((offset, label, visible))
+        offset += len(line)
+    return candidates
+
+
+def _last_line_candidates(region: str, choices: Mapping[str, str]) -> list[AnswerCandidate]:
     last_nonempty = next(
         (line.strip() for line in reversed(region.splitlines()) if line.strip()),
         "",
     )
-    labeled = LEADING_LABELED_CHOICE_RE.match(last_nonempty.strip("*` "))
+    visible = last_nonempty.strip("*` ")
+    labeled = LEADING_LABELED_CHOICE_RE.match(visible)
     if labeled and labeled.group(1).upper() in choices:
         label = labeled.group(1).upper()
         body = normalize_text(labeled.group(2))
         expected = normalize_text(choices[label])
         if not body or body == expected or body.startswith(expected + " because"):
-            candidates.append((region.rfind(last_nonempty), label, last_nonempty))
-    else:
-        text_label = _choice_text_at_start(last_nonempty.strip("*` "), choices)
-        if text_label:
-            candidates.append((region.rfind(last_nonempty), text_label, last_nonempty))
+            return [(region.rfind(last_nonempty), label, last_nonempty)]
+        return []
 
-    if allow_terminal_label:
-        terminal = TERMINAL_LABEL_RE.search(region)
-        if terminal and terminal.group(1).upper() in choices:
-            candidates.append((terminal.start(), terminal.group(1).upper(), terminal.group(0)))
+    text_label = _choice_text_at_start(visible, choices)
+    if text_label:
+        return [(region.rfind(last_nonempty), text_label, last_nonempty)]
 
+    trailing = TRAILING_LABELED_CHOICE_RE.search(last_nonempty)
+    if trailing is None or trailing.group(1) not in choices:
+        return []
+    label = trailing.group(1)
+    body = normalize_text(trailing.group(2))
+    expected = normalize_text(choices[label])
+    if body != expected and not body.startswith(expected + " "):
+        return []
+    return [(region.rfind(last_nonempty) + trailing.start(), label, trailing.group(0))]
+
+
+def _terminal_label_candidates(region: str, choices: Mapping[str, str]) -> list[AnswerCandidate]:
+    candidates: list[AnswerCandidate] = []
+    for pattern in (TERMINAL_LABEL_RE, TERMINAL_OPTION_LABEL_RE):
+        match = pattern.search(region)
+        if match and match.group(1).upper() in choices:
+            candidates.append((match.start(), match.group(1).upper(), match.group(0)))
+    return candidates
+
+
+def _resolve_answer_candidates(candidates: list[AnswerCandidate]) -> ExtractedAnswer:
     if not candidates:
         return ExtractedAnswer(None, "unparseable", None, ())
     candidates.sort(key=lambda item: item[0])
@@ -371,5 +459,26 @@ def extract_answer(
         selected[1],
         "parsed",
         selected[2],
-        tuple(sorted({item[1] for item in candidates})),
+        tuple(sorted(final_labels)),
     )
+
+
+def extract_answer(
+    text: str,
+    choices: Mapping[str, str],
+    *,
+    allow_terminal_label: bool = True,
+) -> ExtractedAnswer:
+    """Extract an answer from an explicit final region or concise terminal line."""
+    stripped = _strip_markdown_presentation(text).strip()
+    if not stripped:
+        return ExtractedAnswer(None, "unparseable", None, ())
+
+    region, has_decision_cue = _answer_region(stripped)
+    candidates = _explicit_answer_candidates(region, choices)
+    if has_decision_cue:
+        candidates.extend(_decision_line_candidates(region, choices))
+    candidates.extend(_last_line_candidates(region, choices))
+    if allow_terminal_label:
+        candidates.extend(_terminal_label_candidates(region, choices))
+    return _resolve_answer_candidates(candidates)

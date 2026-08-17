@@ -1,3 +1,0 @@
-run/state/run.sqlite3 filter=lfs diff=lfs merge=lfs -text
-run/results/cells-and-judgments.jsonl filter=lfs diff=lfs merge=lfs -text
-run/results/attempts.jsonl filter=lfs diff=lfs merge=lfs -text

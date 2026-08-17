@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from instruction_duplication.cli import main
+from instruction_duplication.io_utils import sha256_json
 from instruction_duplication.workspace import Workspace
 
 
@@ -21,6 +22,7 @@ def prepare(workspace: Path, local_jsonl: Path):
             "other",
             "--models",
             "gemma-3-12b",
+            "--fake",
             "--workspace",
             str(workspace),
         ]
@@ -64,6 +66,114 @@ def test_manifest_detects_package_version_change(tmp_path: Path, local_jsonl: Pa
     ws.manifest.write_text(json.dumps(manifest))
     with pytest.raises(RuntimeError, match="package_version"):
         ws.require_prepared()
+
+
+def test_generation_integrity_allows_new_measurement_version(tmp_path: Path, local_jsonl: Path):
+    root = tmp_path / "run"
+    prepare(root, local_jsonl)
+    ws = Workspace(root)
+    manifest = json.loads(ws.manifest.read_text())
+    manifest["package_version"] = "2.2.3"
+    manifest["lexical_version"] = "older-lexical-measurement"
+    manifest["judge_version"] = "older-judge"
+    manifest["analysis_version"] = "older-analysis"
+    ws.manifest.write_text(json.dumps(manifest))
+
+    ws.require_generation_integrity()
+    with pytest.raises(RuntimeError, match="package_version"):
+        ws.require_prepared(require_runtime_environment=False)
+
+
+def test_transport_patch_can_resume_302_workspace(monkeypatch, tmp_path: Path, local_jsonl: Path):
+    root = tmp_path / "run"
+    prepare(root, local_jsonl)
+    ws = Workspace(root)
+    environment = json.loads(ws.environment.read_text())
+    distributions = environment["distributions"]
+    distributions["instruction-duplication"] = "3.0.2"
+    ws.environment.write_text(json.dumps(environment))
+    manifest = json.loads(ws.manifest.read_text())
+    manifest["package_version"] = "3.0.2"
+    manifest["environment_hash"] = sha256_json(environment)
+    ws.manifest.write_text(json.dumps(manifest))
+
+    current = json.loads(json.dumps(environment))
+    current["distributions"]["instruction-duplication"] = "3.0.3"
+    monkeypatch.setattr(
+        "instruction_duplication.workspace.runtime_environment",
+        lambda: current,
+    )
+    monkeypatch.setattr("instruction_duplication.workspace.__version__", "3.0.3")
+
+    ws.require_prepared()
+
+
+def test_transport_compatible_workspace_can_resume_after_measurement_version_change(
+    monkeypatch, tmp_path: Path, local_jsonl: Path
+):
+    root = tmp_path / "run"
+    prepare(root, local_jsonl)
+    ws = Workspace(root)
+
+    environment = json.loads(ws.environment.read_text())
+    environment["distributions"]["instruction-duplication"] = "3.0.6"
+    ws.environment.write_text(json.dumps(environment))
+    manifest = json.loads(ws.manifest.read_text())
+    manifest["package_version"] = "3.0.6"
+    manifest["judge_version"] = "format-neutral-semantic-role-judge-v2.8"
+    manifest["analysis_version"] = "paired-semantic-role-analysis-v2.8"
+    manifest["environment_hash"] = sha256_json(environment)
+    ws.manifest.write_text(json.dumps(manifest))
+
+    current = json.loads(json.dumps(environment))
+    current["distributions"]["instruction-duplication"] = "3.0.9"
+    monkeypatch.setattr(
+        "instruction_duplication.workspace.runtime_environment",
+        lambda: current,
+    )
+    monkeypatch.setattr("instruction_duplication.workspace.__version__", "3.0.9")
+
+    ws.require_prepared()
+
+
+def test_305_does_not_claim_generation_compatibility_with_303(
+    tmp_path: Path, local_jsonl: Path
+):
+    root = tmp_path / "run"
+    prepare(root, local_jsonl)
+    ws = Workspace(root)
+    manifest = json.loads(ws.manifest.read_text())
+    manifest["package_version"] = "3.0.3"
+    ws.manifest.write_text(json.dumps(manifest))
+
+    with pytest.raises(RuntimeError, match="package_version"):
+        ws.require_prepared(require_runtime_environment=False)
+
+
+def test_305_can_resume_304_transport_compatible_workspace(
+    monkeypatch, tmp_path: Path, local_jsonl: Path
+):
+    root = tmp_path / "run"
+    prepare(root, local_jsonl)
+    ws = Workspace(root)
+
+    environment = json.loads(ws.environment.read_text())
+    environment["distributions"]["instruction-duplication"] = "3.0.4"
+    ws.environment.write_text(json.dumps(environment))
+    manifest = json.loads(ws.manifest.read_text())
+    manifest["package_version"] = "3.0.4"
+    manifest["environment_hash"] = sha256_json(environment)
+    ws.manifest.write_text(json.dumps(manifest))
+
+    current = json.loads(json.dumps(environment))
+    current["distributions"]["instruction-duplication"] = "3.0.5"
+    monkeypatch.setattr(
+        "instruction_duplication.workspace.runtime_environment",
+        lambda: current,
+    )
+    monkeypatch.setattr("instruction_duplication.workspace.__version__", "3.0.5")
+
+    ws.require_prepared()
 
 
 def test_manifest_detects_environment_change(tmp_path: Path, local_jsonl: Path):

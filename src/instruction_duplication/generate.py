@@ -11,6 +11,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Literal
 
 import httpx
 
@@ -27,8 +28,10 @@ from .provider import (
     estimate_cost,
     fake_response,
     headers,
+    http_error_payload,
     idempotency_key,
     parse_response,
+    rate_limit_source,
     realized_cost,
     reasoning_field,
     request_payload,
@@ -45,6 +48,7 @@ from .records import (
     GenerationCell,
     GenerationEvent,
 )
+from .schedule import schedule_key
 from .storage import Database
 from .types import AttemptStatus, CellStatus
 
@@ -52,6 +56,7 @@ LOGGER = logging.getLogger(__name__)
 BUDGET_SAFETY_FACTOR = 1.10
 ETA_WINDOW_SECONDS = 120.0
 PROGRESS_HEARTBEAT_SECONDS = 30.0
+type ProcessDisposition = Literal["finished", "retryable"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +88,7 @@ class GenerationProgress:
 
 
 type GenerationProgressSink = Callable[[GenerationProgress], None]
+
 
 
 def utcnow() -> str:
@@ -169,17 +175,12 @@ class Budget:
             return True
 
     async def reconcile(self, reservation: float, actual: float, lock: asyncio.Lock) -> None:
-        """Replace one reservation with the provider-reported or conservative actual cost."""
+        """Commit actual cost; later reservations stop naturally if the cap was exceeded."""
         if actual < 0 or not math.isfinite(actual):
             actual = reservation
         async with lock:
             self.reserved = max(0.0, self.reserved - reservation)
             self.committed += actual
-            if self.committed > self.cap + 1e-9:
-                raise RuntimeError(
-                    "provider cost exceeded its route-price reservation: "
-                    f"spent ${self.committed:.6f} > cap ${self.cap:.6f}"
-                )
 
 
 class AsyncDatabaseWriter:
@@ -285,6 +286,7 @@ class ProviderCircuit:
             )
 
 
+
 @dataclass(slots=True)
 class RouteThrottle:
     """Adapt exact-route concurrency downward on transient provider failures."""
@@ -360,14 +362,6 @@ def _terminal_cell_status(attempt_status: AttemptStatus) -> CellStatus:
     return CellStatus.FAILED
 
 
-def _next_output_ceiling(current: int, capability: int) -> int:
-    """Increase a truncated request ceiling by 50 percent on a 256-token boundary."""
-    if current >= capability:
-        return capability
-    expanded = math.ceil((current * 1.5) / 256) * 256
-    return min(capability, max(current + 256, expanded))
-
-
 def _transport_error_cost(exc: Exception, reservation: float) -> float:
     """Release reservations for explicit rate-limit rejections; keep uncertain failures."""
     if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
@@ -402,6 +396,7 @@ def _empty_circuits() -> dict[tuple[str, str], ProviderCircuit]:
 
 def _empty_route_throttles() -> dict[tuple[str, str, str], RouteThrottle]:
     return {}
+
 
 
 def _empty_clients() -> dict[tuple[str, str], httpx.AsyncClient]:
@@ -674,15 +669,15 @@ class GenerationRuntime:
                 parsed=parsed,
                 actual_cost=realized_cost(route, parsed, reservation),
             )
-        actual = realized_cost(route, parsed, reservation)
-        if actual > reservation + 1e-9:
+        if parsed.finish_reason != "stop":
             raise GenerationResponseError(
                 AttemptStatus.INVALID_RESPONSE,
-                "provider-reported cost exceeded the route-price reservation; "
-                "update route pricing before continuing",
+                f"provider returned non-success finish_reason={parsed.finish_reason!r}",
                 parsed=parsed,
-                actual_cost=actual,
+                actual_cost=realized_cost(route, parsed, reservation),
+                retryable=True,
             )
+        actual = realized_cost(route, parsed, reservation)
         return parsed, actual
 
     async def execute_attempt(
@@ -772,10 +767,7 @@ class GenerationRuntime:
                 else (realized_cost(route, parsed, reservation) if parsed else reservation)
             )
             final_status = (
-                None
-                if exc.status is AttemptStatus.TRUNCATED
-                and requested_max_tokens < model.provider_output_capability
-                else _terminal_cell_status(exc.status)
+                CellStatus.RETRYABLE if exc.retryable else _terminal_cell_status(exc.status)
             )
             return AttemptOutcome(
                 exc.status,
@@ -787,13 +779,24 @@ class GenerationRuntime:
                 actual_cost,
                 started_at,
                 time.monotonic() - started,
+                retryable=exc.retryable,
             )
         except Exception as exc:
             status = _attempt_status(exc, http_status)
             retryable = isinstance(exc, (httpx.TimeoutException, httpx.NetworkError))
+            # httpx/anyio transport exceptions are allowed to carry an empty message
+            # (this is common for connection resets and some Windows socket failures).
+            # A retryable cell must still have a durable non-empty diagnostic because the
+            # SQLite schema deliberately rejects opaque failure states.
+            detail = str(exc).strip()
+            error = detail or type(exc).__name__
             if isinstance(exc, httpx.HTTPStatusError):
                 http_status = exc.response.status_code
                 retryable = http_status in TRANSIENT_STATUS
+                raw = http_error_payload(exc.response)
+                if http_status == 429:
+                    source = rate_limit_source(route, exc.response, raw)
+                    error = f"{error}; rate_limit_source={source}"
             if retryable:
                 delay = retry_delay(exc, attempt_index, request_key)
                 await circuit.transient_failure(delay)
@@ -816,7 +819,7 @@ class GenerationRuntime:
                 parsed,
                 raw,
                 http_status,
-                str(exc),
+                error,
                 _transport_error_cost(exc, reservation),
                 started_at,
                 time.monotonic() - started,
@@ -889,27 +892,10 @@ class GenerationRuntime:
         cell: GenerationCell,
         writer: AsyncDatabaseWriter,
         total: int,
-    ) -> bool:
-        """Run one cell; return true only when a transient failure should be requeued."""
+    ) -> ProcessDisposition:
+        """Run one cell while preserving pinned-route retry semantics."""
         model = self.models[cell.model_id]
         route = self.route_for(model)
-        await writer.submit(CellStarted(cell.cell_id, utcnow()))
-        attempt_count, last_status, last_max_tokens = await asyncio.to_thread(
-            self.db.generation_attempt_state,
-            str(cell.cell_id),
-        )
-        requested_max_tokens = model.request_output_tokens
-        if last_max_tokens is not None:
-            requested_max_tokens = max(requested_max_tokens, last_max_tokens)
-        if (
-            last_status == AttemptStatus.TRUNCATED.value
-            and requested_max_tokens < model.provider_output_capability
-        ):
-            requested_max_tokens = _next_output_ceiling(
-                requested_max_tokens,
-                model.provider_output_capability,
-            )
-
         provider_key = _provider_gate_key(model.id, route)
         throttle_key = _route_throttle_key(model.id, route)
         provider_gate = self.provider_gates.setdefault(
@@ -926,73 +912,67 @@ class GenerationRuntime:
                 )
             ),
         )
-        local_attempt = 0
-        while True:
-            payload = request_payload(
-                model,
-                cell,
-                route,
-                max_output_tokens=requested_max_tokens,
-            )
-            reservation = estimate_cost(route, payload) * BUDGET_SAFETY_FACTOR
-            if not await self.budget.reserve(reservation, self.budget_lock):
-                await writer.submit(BudgetBlocked(cell.cell_id, utcnow()))
-                await self.count("budget_blocked", total)
-                return False
-
-            attempt_number = attempt_count + local_attempt + 1
-            request_key = f"generation:{cell.cell_id}:{attempt_number}"
-            logical_idempotency = idempotency_key(f"{cell.cell_id}:{requested_max_tokens}")
-            await circuit.wait()
-            await throttle.acquire()
-            try:
-                async with provider_gate, self.global_gate:
-                    outcome = await self.execute_attempt(
-                        cell=cell,
-                        model=model,
-                        route=route,
-                        payload=payload,
-                        requested_max_tokens=requested_max_tokens,
-                        reservation=reservation,
-                        logical_idempotency=logical_idempotency,
-                        request_key=request_key,
-                        attempt_index=attempt_number - 1,
-                    )
-            finally:
-                await throttle.release()
-
-            await writer.submit(
-                self.attempt_event(
+        requested_max_tokens = model.request_output_tokens
+        payload = request_payload(
+            model,
+            cell,
+            route,
+            max_output_tokens=requested_max_tokens,
+        )
+        reservation = estimate_cost(route, payload) * BUDGET_SAFETY_FACTOR
+        await circuit.wait()
+        await throttle.acquire()
+        try:
+            async with provider_gate, self.global_gate:
+                if not await self.budget.reserve(reservation, self.budget_lock):
+                    await writer.submit(BudgetBlocked(cell.cell_id, utcnow()))
+                    await self.count("budget_blocked", total)
+                    return "finished"
+                attempt_count, _last_status, _last_max_tokens = await asyncio.to_thread(
+                    self.db.generation_attempt_state,
+                    str(cell.cell_id),
+                )
+                attempt_number = attempt_count + 1
+                request_key = f"generation:{cell.cell_id}:{attempt_number}"
+                logical_idempotency = idempotency_key(f"{cell.cell_id}:{requested_max_tokens}")
+                await writer.submit(CellStarted(cell.cell_id, utcnow()))
+                outcome = await self.execute_attempt(
                     cell=cell,
                     model=model,
                     route=route,
-                    request_key=request_key,
-                    attempt_number=attempt_number,
-                    logical_idempotency=logical_idempotency,
+                    payload=payload,
                     requested_max_tokens=requested_max_tokens,
                     reservation=reservation,
-                    outcome=outcome,
+                    logical_idempotency=logical_idempotency,
+                    request_key=request_key,
+                    attempt_index=attempt_number - 1,
                 )
+        finally:
+            await throttle.release()
+
+        await writer.submit(
+            self.attempt_event(
+                cell=cell,
+                model=model,
+                route=route,
+                request_key=request_key,
+                attempt_number=attempt_number,
+                logical_idempotency=logical_idempotency,
+                requested_max_tokens=requested_max_tokens,
+                reservation=reservation,
+                outcome=outcome,
             )
-            await self.budget.reconcile(reservation, outcome.actual_cost, self.budget_lock)
-            if outcome.cancelled:
-                raise asyncio.CancelledError()
-            if outcome.retryable:
-                return True
-            if outcome.final_status is not None:
-                key = "completed" if outcome.final_status is CellStatus.COMPLETED else "failed"
-                await self.count(key, total)
-                return False
-            if outcome.status is not AttemptStatus.TRUNCATED:
-                raise RuntimeError("non-terminal generation attempt was not truncation")
-            next_ceiling = _next_output_ceiling(
-                requested_max_tokens,
-                model.provider_output_capability,
-            )
-            if next_ceiling <= requested_max_tokens:
-                raise RuntimeError("truncation retry did not increase the output ceiling")
-            requested_max_tokens = next_ceiling
-            local_attempt += 1
+        )
+        await self.budget.reconcile(reservation, outcome.actual_cost, self.budget_lock)
+        if outcome.cancelled:
+            raise asyncio.CancelledError()
+        if outcome.retryable:
+            return "retryable"
+        if outcome.final_status is None:
+            raise RuntimeError("non-transient generation attempt has no terminal status")
+        key = "completed" if outcome.final_status is CellStatus.COMPLETED else "failed"
+        await self.count(key, total)
+        return "finished"
 
     async def close_clients(self) -> None:
         """Close every lazily created HTTP client."""
@@ -1009,11 +989,13 @@ class GenerationResponseError(RuntimeError):
         *,
         parsed: ProviderResponse | None = None,
         actual_cost: float | None = None,
+        retryable: bool = False,
     ) -> None:
         super().__init__(message)
         self.status = status
         self.parsed = parsed
         self.actual_cost = actual_cost
+        self.retryable = retryable
 
 
 async def _run_workers(
@@ -1035,8 +1017,8 @@ async def _run_workers(
     async def worker(pending: deque[GenerationCell]) -> None:
         while pending:
             cell = pending.popleft()
-            should_retry = await runtime.process(cell, writer, total)
-            if should_retry:
+            disposition = await runtime.process(cell, writer, total)
+            if disposition == "retryable":
                 if final_round:
                     await runtime.count("failed", total)
                 else:
@@ -1049,7 +1031,7 @@ async def _run_workers(
                 pending = pending_by_model[model_id]
                 if worker_index < limit and worker_index < len(pending):
                     tasks.create_task(worker(pending))
-    retryable.sort(key=lambda cell: (cell.model_id, cell.question_id, cell.condition_id))
+    retryable.sort(key=lambda cell: schedule_key(cell.cell_id))
     return retryable
 
 
@@ -1126,8 +1108,9 @@ async def run_pending(
         heartbeat_stop.set()
         await heartbeat
         await runtime.close_clients()
-    return {
+    summary: dict[str, int | float] = {
         **runtime.counters,
         "spend": runtime.budget.committed,
         "reserved": runtime.budget.reserved,
     }
+    return summary

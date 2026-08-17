@@ -79,3 +79,19 @@ def test_terminal_choice_text_can_be_extracted():
 def test_numeric_gold_requires_explicit_schema_index_base():
     with pytest.raises(ValueError, match="index_base"):
         canonical_gold_labels("1", CHOICES)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Final Answer: B", "B"),
+        ("Answer: B. Beta therapy", "B"),
+        ("**Final Answer: B**", "B"),
+        ("### Final Answer: **B. Beta therapy**", "B"),
+        ("Final Answer: (B) Beta therapy", "B"),
+    ],
+)
+def test_common_markdown_answer_formats_are_parseable(text: str, expected: str):
+    parsed = extract_answer(text, CHOICES)
+    assert parsed.status == "parsed"
+    assert parsed.option == expected

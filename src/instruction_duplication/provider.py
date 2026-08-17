@@ -20,6 +20,7 @@ from .json_types import (
     integer_value,
     is_object_sequence,
     is_string_mapping,
+    json_object,
     number_value,
     object_value,
     string_mapping,
@@ -213,6 +214,57 @@ class ProviderResponse:
     provider: str | None
     finish_reason: str | None
     refusal: str | None
+
+
+def http_error_payload(response: httpx.Response) -> JsonObject | None:
+    """Return a structured provider error body when the response exposes one."""
+    try:
+        decoded: object = response.json()
+    except (ValueError, TypeError):
+        return None
+    try:
+        return json_object(decoded, path="provider error response")
+    except ValueError:
+        return None
+
+
+def rate_limit_source(
+    route: Route,
+    response: httpx.Response,
+    payload: Mapping[str, object] | None,
+) -> str:
+    """Classify a 429 conservatively from explicit response provenance only."""
+    if response.status_code != 429:
+        raise ValueError("rate-limit provenance requires an HTTP 429 response")
+    if route.backend != "openrouter":
+        return f"unknown-via-{route.backend}:{route.provider}"
+
+    error = payload.get("error") if payload is not None else None
+    error_object: Mapping[str, object]
+    metadata: Mapping[str, object] = {}
+    message = ""
+    try:
+        error_object = object_value(error, name="provider error")
+    except ValueError:
+        error_object = {}
+    raw_metadata = error_object.get("metadata")
+    try:
+        metadata = object_value(raw_metadata, name="provider error metadata")
+    except ValueError:
+        metadata = {}
+    raw_message = error_object.get("message")
+    if isinstance(raw_message, str):
+        message = raw_message.casefold()
+
+    for key in ("provider_name", "provider", "provider_slug"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            return f"upstream:{value.strip()}"
+
+    header_names = {name.casefold() for name in response.headers}
+    if any(name.startswith("x-openrouter") for name in header_names) or "openrouter" in message:
+        return "openrouter"
+    return "unknown-via-openrouter"
 
 
 def hf_token() -> str | None:
@@ -415,24 +467,27 @@ def _parse_http_date(value: str) -> datetime:
 
 
 def retry_delay(exc: Exception, attempt: int, request_key: str) -> float:
-    """Return Retry-After or deterministic exponential backoff."""
+    """Return a server delay bounded below by deterministic exponential backoff."""
+    digest = hashlib.sha256(f"{request_key}\0{attempt}".encode()).digest()
+    jitter = int.from_bytes(digest[:2], "big") / 65535 * 0.5
+    backoff = min(60.0, 2.0**attempt + jitter)
     if isinstance(exc, httpx.HTTPStatusError):
         value = exc.response.headers.get("Retry-After")
         if value:
             try:
-                return min(120.0, max(0.0, float(value)))
+                server_delay = min(120.0, max(0.0, float(value)))
+                return max(backoff, server_delay)
             except ValueError:
                 try:
                     retry_at = _parse_http_date(value)
-                    return min(
+                    server_delay = min(
                         120.0,
                         max(0.0, (retry_at - datetime.now(UTC)).total_seconds()),
                     )
+                    return max(backoff, server_delay)
                 except ValueError:
                     pass
-    digest = hashlib.sha256(f"{request_key}\0{attempt}".encode()).digest()
-    jitter = int.from_bytes(digest[:2], "big") / 65535 * 0.5
-    return min(60.0, 2**attempt + jitter)
+    return backoff
 
 
 def estimate_prompt_tokens(messages: Sequence[ChatMessage | Mapping[str, str]]) -> int:
@@ -470,47 +525,53 @@ def estimate_cost(
 
 
 def realized_cost(route: Route, response: ProviderResponse, reservation: float) -> float:
-    """Prefer reported cost, then usage-derived route cost, then conservative reservation."""
-    if response.reported_cost_usd is not None:
-        return response.reported_cost_usd
+    """Conservatively combine provider-reported and route-derived realized cost."""
+    derived: float | None = None
     if response.input_tokens is not None or response.output_tokens is not None:
-        return (
+        derived = (
             (response.input_tokens or 0) * route.input_usd_per_million
             + (response.output_tokens or 0) * route.output_usd_per_million
         ) / 1_000_000
+    if response.reported_cost_usd is not None and derived is not None:
+        return max(response.reported_cost_usd, derived)
+    if response.reported_cost_usd is not None:
+        return response.reported_cost_usd
+    if derived is not None:
+        return derived
     return reservation
 
 
 def idempotency_key(cell_id: str, phase: str = "generation") -> str:
     """Return one stable idempotency key reused across transport retries."""
-    return hashlib.sha256(f"instruction-duplication-v2\0{phase}\0{cell_id}".encode()).hexdigest()
+    return hashlib.sha256(f"instruction-duplication-v3\0{phase}\0{cell_id}".encode()).hexdigest()
 
 
 def fake_response(cell: GenerationCell) -> FakeResponse:
-    """Return a deterministic, protocol-valid response for tests."""
+    """Return a deterministic, format-neutral response for tests."""
     labels = list(cell.choices)
     second = next(label for label in labels if label != cell.gold)
     if cell.condition_id == "zero":
         content = f"Final answer: {cell.gold}."
     else:
-        content = (
-            f"<response><facts>{cell.stem}</facts>"
-            f"<implications>The stated findings support {cell.choices[cell.gold]} "
-            "and argue against alternatives.</implications>"
-            f'<provisional_answer option="{cell.gold}">'
-            f"{cell.choices[cell.gold]} is the provisional answer because it best "
-            "fits the facts.</provisional_answer>"
-            "<contrastive_check>"
-            f'<second_best option="{second}">{cell.choices[second]} is the second-best '
-            "option but loses on the decisive finding.</second_best>"
-            f"<decisive_fact>{cell.stem}</decisive_fact>"
-            "<answer_changing_change>If the decisive finding changed to support "
-            f"{cell.choices[second]}, option {second} would become best."
-            "</answer_changing_change></contrastive_check>"
-            f'<rereasoning decision="retain">Retain option {cell.gold} after checking '
-            "every stated fact and the contrastive alternative.</rereasoning>"
-            f'<final_answer option="{cell.gold}">'
-            f"{cell.choices[cell.gold]}</final_answer></response>"
+        content = "\n".join(
+            (
+                "1. Facts",
+                cell.stem,
+                "2. Implications",
+                f"The stated findings support {cell.choices[cell.gold]} and argue against alternatives.",
+                "3. Provisional answer",
+                f"Option {cell.gold}, {cell.choices[cell.gold]}, is provisional because it best fits the facts.",
+                "4. Best alternative",
+                f"Option {second}, {cell.choices[second]}, is the best alternative but loses on the decisive finding.",
+                "5. Decisive distinction",
+                cell.stem,
+                "6. What would change the answer",
+                f"If the decisive finding changed to support {cell.choices[second]}, option {second} would become best.",
+                "7. Reconsideration",
+                f"Retain option {cell.gold} after checking the stem again; the decisive evidence remains: {cell.stem}",
+                "8. Final answer",
+                f"Option {cell.gold}: {cell.choices[cell.gold]}",
+            )
         )
     return {
         "id": f"fake-{cell.cell_id[:12]}",

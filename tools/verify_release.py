@@ -15,7 +15,12 @@ sys.path.insert(0, str(SOURCE_ROOT))
 
 
 def _smoke_profile() -> None:
-    from instruction_duplication.models import MODELS
+    from instruction_duplication.models import (
+        MODELS,
+        SMOKE_PROFILE_ID,
+        SMOKE_PROFILE_SCHEMA_VERSION,
+    )
+    from instruction_duplication.protocol import PROTOCOL_HASH
 
     public_path = ROOT / "data" / "smoke-profile-2026-08-05.json"
     package_path = SOURCE / public_path.name
@@ -23,8 +28,26 @@ def _smoke_profile() -> None:
     packaged = json.loads(package_path.read_text(encoding="utf-8"))
     if public != packaged:
         raise RuntimeError("public and packaged smoke profiles differ")
+    if public.get("schema_version") != SMOKE_PROFILE_SCHEMA_VERSION:
+        raise RuntimeError("smoke profile schema version is stale")
+    if public.get("profile_id") != SMOKE_PROFILE_ID:
+        raise RuntimeError("smoke profile identity does not match the model configuration")
     if public["completed_cells"] != 1680:
         raise RuntimeError("smoke profile must contain 1,680 completed cells")
+    provenance = public.get("provenance")
+    if not isinstance(provenance, dict):
+        raise RuntimeError("smoke profile provenance is missing")
+    if provenance.get("active_protocol_hash") != PROTOCOL_HASH:
+        raise RuntimeError("smoke profile is not approved for the active protocol")
+    if provenance.get("compatibility") != "provisional_cross_protocol":
+        raise RuntimeError("unexpected smoke profile compatibility status")
+    if provenance.get("source_protocol_hash") is not None:
+        raise RuntimeError("legacy smoke profile must not invent an unavailable protocol hash")
+    source_archive_hash = provenance.get("source_archive_sha256")
+    if not isinstance(source_archive_hash, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", source_archive_hash
+    ):
+        raise RuntimeError("smoke profile source archive hash is invalid")
 
     profile_models = public["models"]
     for model in MODELS:

@@ -1,5 +1,6 @@
 # Exact direct runtime versions for the current Python 3.12.13+ research environment.
 # Install with: python -m pip install -r requirements-research.lock
+numpy==2.3.5
 httpx==0.28.1
 datasets==5.0.1
 huggingface-hub==1.26.1

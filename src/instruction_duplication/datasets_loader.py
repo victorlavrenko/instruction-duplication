@@ -18,12 +18,15 @@ from .answer_utils import (
     canonicalize_choices,
     normalize_text,
 )
+from .exclusions import QuestionExclusions
 from .io_utils import sha256_file
 from .json_types import JsonObject, json_object, object_sequence, object_value
+from .question_text import strip_exact_embedded_choice_suffix
 from .types import Question
 
 DEFAULT_DATASETS = ("medqa", "medxpertqa", "afrimedqa")
 DEFAULT_SEED = 20260722
+SELECTION_ALGORITHM = "normalize-deduplicate-exclude-shuffle-v4"
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +39,7 @@ class DatasetSpec:
     split: str
     revision: str
     source_split: str
+    embedded_choice_block: bool = False
     gold_index_bases: tuple[tuple[str, int], ...] = (
         ("answer_idx", 0),
         ("answer_index", 0),
@@ -55,6 +59,7 @@ class DatasetSpec:
                 "split": self.split,
                 "revision": self.revision,
                 "source_split": self.source_split,
+                "embedded_choice_block": self.embedded_choice_block,
                 "gold_index_bases": [list(item) for item in self.gold_index_bases],
             },
             path=f"dataset spec {self.name}",
@@ -77,6 +82,7 @@ DATASET_SPECS: dict[str, DatasetSpec] = {
         "test",
         "7e7c465a68eb2b866926bfa59c8c9d17a8daba65",
         "test",
+        True,
     ),
     "afrimedqa": DatasetSpec(
         "afrimedqa",
@@ -268,6 +274,20 @@ def _identifier(row: Mapping[str, object], dataset: str, index: int) -> str:
     return f"{dataset}:row-{index}"
 
 
+def _clean_stem(
+    stem: str,
+    choices: Mapping[str, str],
+    *,
+    require_embedded_choice_block: bool,
+) -> str:
+    cleaned, removed = strip_exact_embedded_choice_suffix(stem, choices)
+    if require_embedded_choice_block and not removed:
+        raise DatasetNormalizationError(
+            "expected terminal Answer Choices block to match structured options"
+        )
+    return cleaned
+
+
 def normalize_row(
     row: Mapping[str, object],
     *,
@@ -275,6 +295,7 @@ def normalize_row(
     source_split: str,
     index: int,
     gold_index_bases: Mapping[str, int] | None = None,
+    embedded_choice_block: bool = False,
 ) -> Question:
     """Normalize one row, rejecting ambiguity instead of guessing."""
     stem, _stem_field = _first_text(row, STEM_FIELDS)
@@ -282,6 +303,11 @@ def normalize_row(
         raise DatasetNormalizationError("question depends on omitted media or table content")
     choice_candidates = _candidate_choices(row)
     choices = choice_candidates[0][1]
+    stem = _clean_stem(
+        stem,
+        choices,
+        require_embedded_choice_block=embedded_choice_block,
+    )
     gold, source, raw = _gold(
         row, choices, DEFAULT_GOLD_INDEX_BASES if gold_index_bases is None else gold_index_bases
     )
@@ -316,6 +342,7 @@ def _normalize_rows(
     dataset: str,
     source_split: str,
     gold_index_bases: Mapping[str, int] | None = None,
+    embedded_choice_block: bool = False,
 ) -> tuple[list[Question], JsonObject]:
     accepted: list[Question] = []
     rejected: Counter[str] = Counter()
@@ -332,6 +359,7 @@ def _normalize_rows(
                 source_split=source_split,
                 index=index,
                 gold_index_bases=gold_index_bases,
+                embedded_choice_block=embedded_choice_block,
             )
         except DatasetNormalizationError as exc:
             rejected[str(exc)] += 1
@@ -376,6 +404,7 @@ def load_hf_dataset(name: str) -> tuple[list[Question], JsonObject]:
         dataset=name,
         source_split=spec.source_split,
         gold_index_bases=dict(spec.gold_index_bases),
+        embedded_choice_block=spec.embedded_choice_block,
     )
     audit["source"] = spec.to_dict()
     return questions, audit
@@ -387,7 +416,9 @@ def _deduplicate_and_sample(
     count: int,
     seed: int,
     dataset: str,
-) -> tuple[list[Question], int]:
+    exclusions: QuestionExclusions | None = None,
+    reserved_stems: frozenset[str] = frozenset(),
+) -> tuple[list[Question], int, int, int]:
     if count < 1:
         raise ValueError("questions_per_dataset must be positive")
     by_stem: dict[str, Question] = {}
@@ -399,13 +430,27 @@ def _deduplicate_and_sample(
             continue
         by_stem[key] = question
     unique = list(by_stem.values())
-    if len(unique) < count:
+    after_previous = (
+        [question for question in unique if not exclusions.contains(question)]
+        if exclusions is not None
+        else unique
+    )
+    excluded_previous = len(unique) - len(after_previous)
+    eligible = [
+        question
+        for question in after_previous
+        if normalize_text(question.stem) not in reserved_stems
+    ]
+    excluded_cross_dataset = len(after_previous) - len(eligible)
+    if len(eligible) < count:
         raise RuntimeError(
-            f"dataset {dataset} has only {len(unique)} eligible unique questions; requested {count}"
+            f"dataset {dataset} has only {len(eligible)} eligible unused unique questions "
+            f"after excluding {excluded_previous} previously used and "
+            f"{excluded_cross_dataset} cross-dataset duplicates; requested {count}"
         )
     rng = random.Random(f"{seed}:{dataset}")
-    rng.shuffle(unique)
-    return unique[:count], duplicate_stems
+    rng.shuffle(eligible)
+    return eligible[:count], duplicate_stems, excluded_previous, excluded_cross_dataset
 
 
 def load_local_jsonl(path: Path) -> tuple[list[Question], JsonObject]:
@@ -483,6 +528,9 @@ def select_questions(
     questions_per_dataset: int,
     seed: int,
     input_jsonl: Path | None = None,
+    exclusions: QuestionExclusions | None = None,
+    exclusion_identity: JsonObject | None = None,
+    exclusion_audit: Sequence[JsonObject] = (),
 ) -> tuple[list[Question], JsonObject]:
     """Load, filter, deduplicate, and deterministically sample exact dataset counts."""
     if len(dataset_names) != len(set(dataset_names)):
@@ -520,9 +568,20 @@ def select_questions(
     selected: list[Question] = []
     selection_audits: list[JsonObject] = []
     seen_ids: set[str] = set()
+    selected_stems: set[str] = set()
     for name in dataset_names:
-        sample, duplicate_stems = _deduplicate_and_sample(
-            grouped[name], count=questions_per_dataset, seed=seed, dataset=name
+        (
+            sample,
+            duplicate_stems,
+            excluded_previous,
+            excluded_cross_dataset,
+        ) = _deduplicate_and_sample(
+            grouped[name],
+            count=questions_per_dataset,
+            seed=seed,
+            dataset=name,
+            exclusions=exclusions,
+            reserved_stems=frozenset(selected_stems),
         )
         for question in sample:
             if question.id in seen_ids:
@@ -530,13 +589,18 @@ def select_questions(
                     f"duplicate normalized question id across datasets: {question.id}"
                 )
             seen_ids.add(question.id)
+            selected_stems.add(normalize_text(question.stem))
         selected.extend(sample)
+        unique_stems = len(grouped[name]) - duplicate_stems
         selection_audits.append(
             {
                 "dataset": name,
-                "eligible": len(grouped[name]),
+                "normalized_candidates": len(grouped[name]),
+                "unique_stems": unique_stems,
+                "previously_used_removed": excluded_previous,
+                "cross_dataset_duplicates_removed": excluded_cross_dataset,
+                "eligible_unused": unique_stems - excluded_previous - excluded_cross_dataset,
                 "selected": len(sample),
-                "duplicate_stems_removed": duplicate_stems,
                 "selected_ids": [question.id for question in sample],
             }
         )
@@ -547,9 +611,11 @@ def select_questions(
                 "datasets": list(dataset_names),
                 "questions_per_dataset": questions_per_dataset,
                 "seed": seed,
-                "algorithm": "normalize-deduplicate-shuffle-v2",
+                "algorithm": SELECTION_ALGORITHM,
+                "question_exclusions": exclusion_identity or {"sources": []},
             },
             "loading": loading_audits,
+            "exclusion_sources": list(exclusion_audit),
             "datasets": selection_audits,
             "total_selected": len(selected),
         },

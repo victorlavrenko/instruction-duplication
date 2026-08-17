@@ -1,6 +1,6 @@
 {
   "completed_cells": 1680,
-  "method": "request ceilings are at least 25% above each observed per-model maximum and rounded up to a 256-token boundary; prompt estimate uses the worst observed token/character ratio with additional fixed overhead",
+  "method": "legacy 2026-08-05 smoke envelope with loop-bounding per-model ceilings; Mistral Large ceiling corrected from 1792 to 2304 using the later 2026-08-10 240-cell stop-completion sample; other ceilings remain unchanged",
   "models": {
     "gemma-3-12b": {
       "cells": 240,
@@ -50,7 +50,7 @@
         "p95": 1040.6499999999999,
         "p99": 1184.4699999999996
       },
-      "request_output_tokens": 1792
+      "request_output_tokens": 2304
     },
     "qwen3-235b-a22b-instruct-2507": {
       "cells": 240,
@@ -87,6 +87,30 @@
       "p99": 1974.3600000000006
     }
   },
-  "profile_id": "run.tgz-2026-08-05-1680-cells",
-  "source_archive": "run.tgz"
+  "profile_id": "run.tgz-2026-08-05-plus-2026-08-10-ceiling-fix-v1",
+  "provenance": {
+    "active_protocol_hash": "86b92dcf90caef0528ec7270c28bcd50f65e2a9bbc187ea8348824f06001b4c1",
+    "compatibility": "provisional_cross_protocol",
+    "source_archive": "run.tgz",
+    "source_archive_sha256": "b486d2431aefeed2d5ca1740eb89bdcb1f5a138b9a33703b266e0ad21c71dceb",
+    "source_protocol_hash": null,
+    "source_protocol_identity": "not_recorded_by_legacy_workspace"
+  },
+  "schema_version": 2,
+  "supplemental_ceiling_evidence": {
+    "source": "instruction-duplication 2.5.2 current-protocol smoke, 2026-08-10",
+    "source_protocol_hash": "652365b5d8daa71def41f564b5e550ef2739a8e8b58ef2f3c48574ad1cbcf8f6",
+    "mistral-large-3-2512": {
+      "completed_stop_cells": 240,
+      "output_tokens_max": 1663,
+      "output_tokens_p99": 1504.35,
+      "validated_request_output_tokens": 2304
+    },
+    "qwen3-235b-a22b-instruct-2507": {
+      "provider_reported_tokens_above_request_cells": 8,
+      "observed_effective_output_usd_per_million_max": 0.6188,
+      "conservative_fallback_output_usd_per_million": 0.62
+    },
+    "compatibility": "cross_protocol_supporting_evidence"
+  }
 }

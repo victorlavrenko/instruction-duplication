@@ -1,14 +1,19 @@
 # Instruction Duplication
 
-Instruction Duplication runs a controlled experiment on instruction placement and repetition. It compares the same multiple-choice questions across eight prompt conditions, from no protocol to three copies placed in the system message and before or after the question.
+Instruction Duplication tests a simple inference-time control mechanism: repeat the same procedural instruction and measure whether the model follows it more completely.
 
-The default configuration uses seven instruction-tuned models and three medical question datasets. A full run with 100 questions per dataset contains 300 questions × 7 models × 8 conditions, or 16,800 cells.
+The experiment evaluates the same medical multiple-choice questions under eight instruction-placement conditions. The default full run uses:
 
-## Analyze the committed run
+- 300 questions: 100 each from MedQA, MedXpertQA, and AfriMed-QA
+- 7 instruction-tuned language models
+- 8 prompt conditions
+- 16,800 scheduled generations
 
-The repository is intended to include a completed `run/` workspace. You can inspect and reanalyze that generation without provider credentials and without sending any model requests.
+The main question is whether duplication changes the **trajectory the model produces**, separately from whether its final answer is correct.
 
-Create an environment from the checked-out source:
+## Install
+
+Python 3.12.13 or newer is recommended.
 
 ```bash
 python -m venv .venv
@@ -18,100 +23,51 @@ python -m pip install -r requirements-research.lock
 python -m pip install -e .
 ```
 
-On Windows PowerShell, activate it with:
+On Windows PowerShell:
 
 ```powershell
 .venv\Scripts\Activate.ps1
 ```
 
-Inspect the committed run:
+## Reproduce the experiment
 
-```bash
-instruction-duplication status --workspace run
-instruction-duplication analyze --workspace run
-```
-
-`analyze` recomputes the statistical analysis from the stored cells and judgments. It does not contact inference providers. Pooled endpoints are reported individually without joint Holm correction; model-specific tests are Holm-adjusted across the seven models separately within each endpoint. Trailing-copy and dataset-specific contrasts are reported unadjusted as exploratory or descriptive analyses. The main outputs are:
-
-- `run/results/report.txt` — readable analysis summary;
-- `run/results/analysis.json` — machine-readable statistical results;
-- `run/results/cells-and-judgments.jsonl` — flat cell-level export;
-- `run/results/attempts.jsonl` — complete preflight and generation attempt provenance.
-
-If scorer code changes while the stored generations remain the intended sample, refresh deterministic judgments first:
-
-```bash
-instruction-duplication judge --workspace run
-instruction-duplication analyze --workspace run
-```
-
-Judging and analysis use the stored generation data and require no provider API keys.
-
-A full run can exceed GitHub's ordinary per-file size limit, especially `run/state/run.sqlite3`. This repository marks the database and large JSONL exports for Git LFS. Clone with Git LFS enabled so those files are materialized before running `status`, `judge`, or `analyze`.
-
-## Reproduce the generation
-
-A new generation requires Python 3.12.13 or newer, a Hugging Face token, an OpenRouter API key, or both, and enough provider credit for the requested run. With the default `--backend auto` policy, each model has its own preferred backend and preflight falls back to the other backend only if the preferred one is unavailable or fails its probes. The default panel keeps Hugging Face preferred for four models and prefers OpenRouter for `llama-3.3-70b-instruct`, `qwen3-30b-a3b-instruct-2507`, and `qwen3-235b-a22b-instruct-2507`. These three models showed the clearest provider-side throughput constraints in observed runs; the Qwen3 235B default avoids the Hugging Face/DeepInfra route that repeatedly timed out and collapsed to single-request concurrency.
-
-Set credentials for the providers you want preflight to consider:
+Generation uses Hugging Face and/or OpenRouter. Set the credentials for the providers you want to use:
 
 ```bash
 export HF_TOKEN=hf_...
 export OPENROUTER_API_KEY=...
 ```
 
-PowerShell equivalents:
+PowerShell:
 
 ```powershell
 $env:HF_TOKEN = "hf_..."
 $env:OPENROUTER_API_KEY = "..."
 ```
 
-Run the full 100-question-per-dataset replication into a fresh workspace:
+Run the default 100-question-per-dataset experiment:
 
 ```bash
-instruction-duplication reproduce --workspace run
+instruction-duplication 100 --workspace run
 ```
 
-For a smaller smoke or exploratory run:
+For a small smoke run:
 
 ```bash
-instruction-duplication reproduce 10 --workspace run
+instruction-duplication 10 --workspace run-smoke
 ```
 
-Per-model defaults are part of the versioned model panel. `--backend hf` or `--backend openrouter` still forces one backend for every model. Under the default `--backend auto`, a single model can be overridden without changing the source panel:
+The pipeline prepares the selected questions, resolves and pins provider routes, generates missing cells, judges the stored responses, and writes the statistical analysis. It is resumable: completed cells are reused when the experiment identity still matches.
+
+Use an explicit spending limit when desired:
 
 ```bash
-instruction-duplication reproduce 10 --workspace run \
-  --prefer-backend llama-3.3-70b-instruct=hf \
-  --prefer-backend qwen3-30b-a3b-instruct-2507=openrouter
+instruction-duplication 10 \
+  --workspace run-smoke \
+  --max-cost 20
 ```
 
-`--prefer-backend` changes only preflight order. Once `config/routes.json` exists, the selected exact routes remain pinned; use a fresh workspace or run `preflight` explicitly before generation if you want different routes.
-
-`reproduce` prepares the workspace, pins one provider route per model, generates missing cells, refreshes deterministic judgments, and writes the analysis. It can be rerun after interruption. Existing cells are reused only when the experiment identity and pinned route provenance still match.
-
-Transient provider failures are retried in later sweeps rather than being exhausted immediately on one cell. A transient error reduces concurrency for the affected exact route and provider cooldowns are shared by workers using that provider; successful requests restore route concurrency gradually. The selected provider route remains pinned throughout generation.
-
-If a provider ends a response because the requested output ceiling was reached, the runner records that attempt and retries the same cell with a larger ceiling, up to the model/provider capability. The ordinary ceilings remain based on the observed smoke run, so normal requests do not reserve the provider maximum unnecessarily.
-
-After the configured transient retry rounds are exhausted, `reproduce` still judges and analyzes the run if some cells remain `retryable`. Those cells are included in the intention-to-treat analysis as generation failures, exactly like other unsuccessful generations. A later `reproduce` invocation can retry them and then refresh the judgments and analysis. The workflow stops only when cells were not fully attempted at all (`pending`, `running`, or `budget_blocked`); resolve those states or increase the cost cap before analysis.
-
-Operational progress is written to standard error: pipeline stages, route probes and selections, generation parallelism, retry sweeps, and periodic completion counts. Generation progress includes a recent-throughput rate and ETA; the ETA is refreshed every 30 seconds during long cooldowns so adaptive route throttling is reflected instead of leaving the initial estimate unchanged. When throttling is active, a separate `bottlenecks` line names each constrained model and pinned backend/provider, its current adaptive limit versus the unconstrained worker demand, the number of active requests, and any remaining provider cooldown. The final report remains on standard output.
-
-Use an explicit cost limit when desired:
-
-```bash
-instruction-duplication reproduce 10 \
-  --workspace run \
-  --max-cost 20 \
-  --concurrency 64 \
-  --per-model-concurrency 8
-```
-
-The runner reserves a conservative worst-case amount before dispatching each request and reconciles the reservation after the attempt. Explicit HTTP 429 rejections release their reservation because no generation was accepted; timeouts and other failures with uncertain provider execution remain conservatively accounted.
-
-## Run individual stages
+The individual stages are also available:
 
 ```bash
 instruction-duplication prepare 10 --workspace run
@@ -122,42 +78,126 @@ instruction-duplication judge --workspace run
 instruction-duplication analyze --workspace run
 ```
 
-The staged commands are useful when route selection, generation, or analysis needs to be inspected separately.
+See [docs/providers.md](docs/providers.md) for provider selection, retry behavior, concurrency, and budgeting.
 
-## Workspace layout
+## Reanalyze the paper run
 
-The path passed to `--workspace` is the workspace itself. Runtime state and exported results use ordinary subdirectories:
+The complete frozen generation used for the paper is distributed separately from the Git repository because the generated responses and run database are large research artifacts rather than source code.
+
+After extracting the archive, the stored generations can be rejudged and reanalyzed without provider credentials:
+
+```bash
+instruction-duplication status --workspace run-2026-08-12
+instruction-duplication judge --workspace run-2026-08-12
+instruction-duplication analyze --workspace run-2026-08-12
+```
+
+`judge` operates only on the stored questions and generations. It does not regenerate responses or contact an inference provider.
+
+`analyze` recomputes the paired statistical analysis from the current deterministic judgments.
+
+The frozen run archive will be published as a separate release artifact together with the paper.
+
+## Experimental design
+
+The instructed conditions ask the model to perform eight reasoning roles in order:
+
+1. Facts
+2. Implications
+3. Provisional answer
+4. Best alternative
+5. Decisive distinction
+6. What would change the answer
+7. Reconsideration
+8. Final answer
+
+The eight prompt conditions vary instruction copy count and placement:
+
+- no instruction
+- system only
+- before the question
+- after the question
+- system + before
+- system + after
+- before + after
+- system + before + after
+
+The principal copy-count comparison contrasts the three one-copy conditions with the three two-copy conditions. Placement effects are analyzed separately.
+
+See [docs/experiment.md](docs/experiment.md) for the exact protocol, contrasts, and analysis conventions.
+
+## Measurements
+
+Final-answer accuracy and trajectory quality are measured separately.
+
+The main trajectory measurements are:
+
+- **Substantive protocol completion** — whether the requested reasoning roles are present and actually perform their requested functions.
+- **Pre-provisional TF-IDF recall** — how much question-specific material is exposed before the model commits to a provisional answer.
+- **Contrastive discussion** — whether the response supplies a provisional answer, a different alternative, a decisive distinction, an answer-changing counterfactual, and reconsideration.
+- **Accuracy** — correctness of the final multiple-choice answer.
+
+TF-IDF uses global document frequencies from a pinned PubMed reference corpus of 15,103,887 abstracts from 2010–2024. Credit is capped by the source stem, so repeating the same term cannot increase recall indefinitely.
+
+These lexical measurements quantify **visible question-specific coverage**. They are not measures of hidden reasoning, proposition truth, or medical correctness.
+
+The judge also records structural and lexical diagnostics such as section order, section substance, polarity/laterality/timing anchors, response length, and TF-IDF mass per 100 pre-answer tokens.
+
+## Human validation
+
+Automatic measurements are designed to be auditable. The run exports condition-blinded matched pairs for simple human checks of individual judge components.
+
+The validation tasks are intentionally atomic. Reviewers are not asked to solve the medical question or decide whether a model's diagnosis is correct. For example, a lexical-coverage task highlights question-specific terms present in each response and asks which response preserves more of them.
+
+Human disagreement is analyzed as a signed correction to the automatic treatment effect rather than requiring perfect human-machine agreement.
+
+## Outputs
+
+A workspace has the following structure:
 
 ```text
 run/
 ├── manifest.json
 ├── config/
-│   ├── models.json
-│   ├── environment.json
-│   ├── routes.json
-│   └── preflight.json
 ├── data/
-│   ├── questions.jsonl
-│   ├── dataset-audit.json
-│   └── lexical-reference.json
 ├── state/
 │   └── run.sqlite3
 └── results/
-    ├── analysis.json
+    ├── paper-report.txt
     ├── report.txt
+    ├── analysis.json
+    ├── model-effect-summary.csv
+    ├── model-effects.csv
     ├── cells-and-judgments.jsonl
-    └── attempts.jsonl
+    ├── attempts.jsonl
+    ├── blinded-matched-pair-audit.jsonl
+    └── blinded-matched-pair-key.jsonl
 ```
 
-`manifest.json` binds the selected questions, model panel, protocol, scorer versions, and prepared environment. `config/routes.json` binds the exact routes selected by preflight. The SQLite database is the authoritative mutable run state; the files under `results/` are reproducible exports.
+The most useful outputs are:
 
-## Experiment details
+- `paper-report.txt` — compact results intended for the paper
+- `report.txt` — full analysis and audit report
+- `analysis.json` — machine-readable statistical results
+- `model-effects.csv` — model-by-metric effects, confidence intervals, and p-values
+- `cells-and-judgments.jsonl` — cell-level responses and deterministic judgments
 
-The instructed conditions require a single XML response containing facts, implications, a provisional answer, a contrastive check, rereasoning, and a final answer. Compliance is measured separately from answer accuracy. Generation failures remain in the intention-to-treat analysis.
+`manifest.json` binds the selected questions, model panel, protocol, scorer versions, and prepared environment. Provider routes selected during preflight are stored under `config/`.
 
-The lexical measurements are deterministic anchor-recall diagnostics. They measure surface coverage of stem details such as polarity, laterality, timing, and quantities; they are not semantic-equivalence or medical-validity scores.
+The SQLite database and large JSONL exports are runtime/research artifacts and are not intended to be committed to ordinary Git history.
 
-See [docs/experiment.md](docs/experiment.md) for the condition design, measurements, and analysis conventions. Provider selection, retry behavior, and budgeting are described in [docs/providers.md](docs/providers.md).
+## Independent question selection
+
+A new experiment can exclude questions already used in another workspace:
+
+```bash
+instruction-duplication 100 \
+  --workspace run-confirmatory \
+  --exclude-workspace run-pilot \
+  --exclude-workspace run-smoke
+```
+
+`--exclude-workspace` is repeatable. Exclusion uses both source-qualified question IDs and normalized stems to avoid silently reusing the same question.
 
 ## Development
 
@@ -167,4 +207,4 @@ Install development and test dependencies:
 python -m pip install -e ".[dev,test]"
 ```
 
-Then follow [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/development.md](docs/development.md).
+Then run the test suite and see [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/development.md](docs/development.md).
