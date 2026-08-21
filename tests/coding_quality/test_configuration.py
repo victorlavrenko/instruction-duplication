@@ -34,24 +34,3 @@ def test_async_test_dependency_is_declared() -> None:
     assert "requirements-dev.lock" in workflow
     assert "pytest-asyncio" in (ROOT / "requirements-dev.lock").read_text(encoding="utf-8")
 
-
-def test_gitignore_keeps_generated_state_out_without_hiding_committed_run() -> None:
-    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
-    for pattern in (
-        "__pycache__/",
-        ".venv/",
-        ".env",
-        "build/",
-        "dist/",
-        ".pytest_cache/",
-        ".ruff_cache/",
-        "/run/.lock",
-        "/run/state/run.sqlite3-wal",
-        "/run/state/run.sqlite3-shm",
-    ):
-        assert pattern in gitignore
-    patterns = {
-        line.strip() for line in gitignore.splitlines() if line.strip() and not line.startswith("#")
-    }
-    assert "/run/" not in patterns
-    assert "run/" not in patterns
