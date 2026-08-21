@@ -1,4 +1,8 @@
-"""Versioned paired ITT analysis with endpoint-scoped multiplicity control."""
+"""Versioned paired ITT analysis with endpoint-scoped multiplicity control.
+
+Paper mapping: implements the paired one-copy/two-copy contrasts, question-cluster
+bootstrap intervals, paired sign-flip tests, Holm correction, and factorial summaries
+described in ``Experiment -> Inference and Audit Design`` and ``Results``."""
 
 from __future__ import annotations
 
@@ -35,9 +39,9 @@ PRIMARY_OUTCOMES = (
     "required_section_count",
     "nontrivial_section_count",
     "preprovisional_tfidf_recall",
-    "contrastive_discussion_score",
-    "substantive_role_count",
-    "complete_role_scaffold",
+    "validated_contrastive_discussion_score",
+    "validated_role_count",
+    "all_roles_validated_complete",
     "preprovisional_commitment_itt",
 )
 # Judge v2 makes non-trivial section completion the future-run primary compliance endpoint.
@@ -47,8 +51,8 @@ CONFIRMATORY_PRIMARY_OUTCOME = "nontrivial_section_count"
 KEY_SECONDARY_OUTCOMES = (
     "required_section_count",
     "preprovisional_tfidf_recall",
-    "contrastive_discussion_score",
-    "substantive_role_count",
+    "validated_contrastive_discussion_score",
+    "validated_role_count",
     "preprovisional_commitment_itt",
     "accuracy",
 )
@@ -57,6 +61,8 @@ ROLE_DIAGNOSTIC_OUTCOMES = (
     "nontrivial_section_count",
     "contrastive_discussion_count",
     "contrastive_discussion_score",
+    "validated_contrastive_discussion_count",
+    "validated_contrastive_discussion_score",
     "provisional_answer_discussed",
     "best_alternative_discussed",
     "decisive_distinction_discussed",
@@ -67,14 +73,19 @@ ROLE_DIAGNOSTIC_OUTCOMES = (
     "substantive_role_count",
     "role_completeness_score",
     "all_roles_substantive",
+    "validated_role_count",
+    "validated_role_completeness_score",
+    "all_roles_validated_complete",
     "roles_in_requested_order",
     "complete_role_scaffold",
+    "validated_complete_role_scaffold",
     "role_facts_complete",
     "role_implications_complete",
     "role_provisional_answer_complete",
     "role_best_alternative_complete",
     "role_decisive_distinction_complete",
     "role_answer_changing_change_complete",
+    "role_answer_changing_change_nontrivial",
     "role_reconsideration_complete",
     "role_final_answer_complete",
     "protocol_scaffold_complete",
@@ -142,14 +153,14 @@ COMPLEXITY_GROUPS = ("one_fact", "two_facts", "three_or_more_facts")
 COMPLEXITY_OUTCOMES = (
     "nontrivial_section_count",
     "preprovisional_tfidf_recall",
-    "contrastive_discussion_score",
+    "validated_contrastive_discussion_score",
     "atomic_fact_coverage",
 )
 FACTORIAL_OUTCOMES = (
     "required_section_count",
     "nontrivial_section_count",
     "preprovisional_tfidf_recall",
-    "contrastive_discussion_score",
+    "validated_contrastive_discussion_score",
     "accuracy",
 )
 FACTORIAL_TERMS = (
@@ -166,6 +177,8 @@ ZERO_AS_ABSENT_PROTOCOL = {
     "nontrivial_section_count",
     "contrastive_discussion_count",
     "contrastive_discussion_score",
+    "validated_contrastive_discussion_count",
+    "validated_contrastive_discussion_score",
     "provisional_answer_discussed",
     "best_alternative_discussed",
     "decisive_distinction_discussed",
@@ -176,14 +189,19 @@ ZERO_AS_ABSENT_PROTOCOL = {
     "substantive_role_count",
     "role_completeness_score",
     "all_roles_substantive",
+    "validated_role_count",
+    "validated_role_completeness_score",
+    "all_roles_validated_complete",
     "roles_in_requested_order",
     "complete_role_scaffold",
+    "validated_complete_role_scaffold",
     "role_facts_complete",
     "role_implications_complete",
     "role_provisional_answer_complete",
     "role_best_alternative_complete",
     "role_decisive_distinction_complete",
     "role_answer_changing_change_complete",
+    "role_answer_changing_change_nontrivial",
     "role_reconsideration_complete",
     "role_final_answer_complete",
     "protocol_scaffold_complete",

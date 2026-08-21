@@ -1,4 +1,8 @@
-"""Experimental conditions and the single authoritative protocol text."""
+"""Experimental conditions and the single authoritative protocol text.
+
+Paper mapping: implements the intervention and the 2x2x2 placement design described
+in ``Experiment -> Models, Questions, and Factorial Conditions`` and the eight-role
+instruction described in ``Experiment -> Procedural Instruction``."""
 
 from __future__ import annotations
 

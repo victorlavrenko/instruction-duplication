@@ -50,5 +50,5 @@ Desktop.ini
 *.log
 .*.tmp
 
-# runs are too big for GitHub
+# Runs do not belong to Git
 /run*

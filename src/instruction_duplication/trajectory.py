@@ -1,10 +1,10 @@
 """Format-neutral extraction of the visible reasoning trajectory.
 
-The experiment asks for eight named headings without discussing presentation syntax.
-This module recognizes ordinary text, numbering, Markdown, XML-like headings, and a
-small frozen set of role-title aliases. Presentation syntax is used only to find
-section boundaries and is never privileged by the substantive measurements.
-"""
+Paper mapping: implements section recovery used by ``Experiment -> Measurements and
+Eligibility``. The experiment asks for eight named headings without privileging a
+presentation syntax; this module recognizes ordinary text, numbering, Markdown,
+XML-like headings, and a frozen set of role-title aliases solely to recover section
+boundaries for the deterministic measurements."""
 
 from __future__ import annotations
 
@@ -54,8 +54,43 @@ _SEMANTIC_LABELS = {
     "second_best": (r"best[ _-]+alternative|second[ _-]+best(?:[ _-]+answer)?|runner[ _-]*up"),
     "decisive_fact": r"decisive[ _-]+distinction|decisive[ _-]+fact|key[ _-]+distinction",
     "answer_changing_change": (
-        r"answer[ _-]+changing[ _-]+change|what[ _-]+would[ _-]+change[ _-]+the[ _-]+answer|"
-        r"answer[ _-]+change|counterfactual[ _-]+change"
+        # Conservative unnumbered synonyms. These all explicitly describe an
+        # answer-changing/counterfactual role; vague "what would change?" is handled
+        # only by the numbered Step-6 fallback below.
+        r"answer[ _-]+changing[ _-]+(?:change|scenario)|"
+        r"answer[ _-]+change|"
+        r"counterfactual(?:[ _-]+(?:change|scenario|test))?|"
+        r"what[ _-]+would[ _-]+change[ _-]+(?:the[ _-]+)?(?:answer|question)"
+        r"(?:[ _-]+to[ _-]+(?:(?:(?:option|choice)[ _-]+)?[A-Z]"
+        r"(?:[ _-]*\([^\)\r\n]{1,60}\))?|[^()\r\n:]{1,60}[ _-]*\([A-Z]\)))?|"
+        r"what[ _-]+(?:would[ _-]+need[ _-]+to|needs?[ _-]+to)[ _-]+change|"
+        r"what[ _-]+change[ _-]+would[ _-]+(?:change|alter|switch)[ _-]+"
+        r"(?:the[ _-]+)?answer(?:[ _-]+to[ _-]+(?:(?:option|choice)[ _-]+)?[A-Z])?|"
+        r"how[ _-]+(?:could|would)[ _-]+(?:the[ _-]+)?answer[ _-]+change|"
+        r"what[ _-]+would[ _-]+make[ _-]+(?:the[ _-]+)?"
+        r"(?:best[ _-]+alternative|second[ _-]+best(?:[ _-]+answer)?|alternative|"
+        r"(?:(?:option|choice)[ _-]+)?[A-Z])"
+        r"[ _-]+(?:the[ _-]+)?(?:best[ _-]+answer|best|correct|win)|"
+        r"how[ _-]+to[ _-]+make[ _-]+(?:the[ _-]+)?"
+        r"(?:best[ _-]+alternative|second[ _-]+best(?:[ _-]+answer)?|alternative|"
+        r"(?:(?:option|choice)[ _-]+)?[A-Z])[ _-]+(?:best|correct|win)|"
+        r"(?:smallest[ _-]+)?change[ _-]+(?:needed|required)[ _-]+"
+        r"(?:to[ _-]+(?:change|alter|switch)[ _-]+(?:the[ _-]+)?answer|"
+        r"for[ _-]+(?:the[ _-]+)?"
+        r"(?:best[ _-]+alternative|second[ _-]+best(?:[ _-]+answer)?|alternative|"
+        r"(?:(?:option|choice)[ _-]+)?[A-Z])"
+        r"[ _-]+to[ _-]+(?:win|be[ _-]+correct|become[ _-]+best))|"
+        r"change[ _-]+that[ _-]+would[ _-]+make[ _-]+(?:the[ _-]+)?"
+        r"(?:best[ _-]+alternative|second[ _-]+best(?:[ _-]+answer)?|alternative|"
+        r"(?:(?:option|choice)[ _-]+)?[A-Z])[ _-]+(?:win|correct|best)|"
+        r"conditions?[ _-]+for[ _-]+(?:the[ _-]+)?"
+        r"(?:best[ _-]+alternative|second[ _-]+best(?:[ _-]+answer)?|alternative|"
+        r"(?:(?:option|choice)[ _-]+)?[A-Z])"
+        r"[ _-]+to[ _-]+(?:win|be[ _-]+correct|become[ _-]+best)|"
+        r"when[ _-]+would[ _-]+(?:the[ _-]+)?"
+        r"(?:best[ _-]+alternative|second[ _-]+best(?:[ _-]+answer)?|alternative|"
+        r"(?:(?:option|choice)[ _-]+)?[A-Z])"
+        r"[ _-]+(?:win|be[ _-]+correct|become[ _-]+best)"
     ),
     "rereasoning": (
         r"reconsideration|re[ _-]?reasoning|rereasoning|re[ _-]?evaluation|final[ _-]+check"
@@ -72,6 +107,26 @@ SEMANTIC_HEADING_PATTERNS = {
     )
     for index, tag in enumerate(CONTENT_TAGS, start=1)
 }
+
+# Some models preserve the requested role number while paraphrasing its title.
+# Because explicit "6." / "Step 6" is itself a strong boundary signal, this
+# fallback may safely accept a somewhat wider family than the unnumbered aliases.
+# Body prose without an explicit Step-6 marker is not recovered by this fallback.
+STEP6_NUMBERED_HEADING_FALLBACK_RE = re.compile(
+    r"(?im)^[ \t]*(?:\#{1,6}[ \t]*)?(?:[-+*][ \t]+)?"
+    r"(?:\*\*|__)?(?:step[ \t]*)?6[.:)\-][ \t]*(?:\*\*|__)?"
+    r"(?:"
+    r"what[ _-]+would[ _-]+change(?:[ _-]+(?:the[ _-]+)?(?:answer|question))?"
+    r"(?:[ _-]+to[ _-]+[^:\r\n\u2014\u2013-]{1,80})?|"
+    r"what[ _-]+(?:would[ _-]+need[ _-]+to|needs?[ _-]+to)[ _-]+change|"
+    r"what[ _-]+would[ _-]+make[ _-]+[^:\r\n\u2014\u2013-]{1,80}|"
+    r"how[ _-]+to[ _-]+make[ _-]+[^:\r\n\u2014\u2013-]{1,80}|"
+    r"(?:smallest[ _-]+)?change[ _-]+(?:needed|required)"
+    r"(?:[ _-]+[^:\r\n\u2014\u2013-]{1,80})?|"
+    r"counterfactual(?:[ _-]+(?:change|scenario|test))?"
+    r")"
+    r"(?:\?)?(?:\*\*|__)?[ \t]*(?:[:\u2014\u2013-][ \t]*|(?=\r?$))"
+)
 CLOSING_TAG_PATTERNS = {
     tag: re.compile(
         rf"</\s*{tag}\b(?P<attrs>[^<>]*)>",
@@ -1527,6 +1582,19 @@ def _semantic_matches(
     recovered: dict[str, tuple[re.Match[str], ...]] = {}
     for tag in CONTENT_TAGS:
         headings = tuple(SEMANTIC_HEADING_PATTERNS[tag].finditer(document))
+        if tag == "answer_changing_change":
+            # Merge the broader numbered fallback without double-counting a line
+            # already recognized by the ordinary semantic-heading pattern.
+            all_headings = (*headings, *STEP6_NUMBERED_HEADING_FALLBACK_RE.finditer(document))
+            headings = tuple(
+                match
+                for _, match in sorted(
+                    {
+                        (match.start(), match.end()): match
+                        for match in all_headings
+                    }.items()
+                )
+            )
         combined = sorted((*exact[tag], *headings), key=lambda match: match.start())
         if combined:
             best_strength = max(_semantic_marker_strength(document, match) for match in combined)
@@ -1575,7 +1643,10 @@ def _candidate_sequence_score(
     exact ties in favor of the later scaffold, which is the conventional pattern
     when a model prints a template and then a filled response.
     """
-    body = _local_semantic_body(document, semantic_matches, match)
+    body = _strip_guidance_echo(
+        tag,
+        _local_semantic_body(document, semantic_matches, match),
+    )
     body_tokens = len(normalize_text(body).split())
     score = float(_semantic_marker_strength(document, match) * 10)
     score += min(30.0, float(body_tokens))
@@ -1655,11 +1726,53 @@ def _coherent_semantic_sequence(
 def _selected_segment_end(
     document: str,
     selected: Mapping[str, re.Match[str]],
+    semantic_matches: Mapping[str, tuple[re.Match[str], ...]],
+    tag: str,
     start: re.Match[str],
 ) -> int:
-    """End a recovered section at the next boundary in the selected trajectory."""
+    """End one selected role without swallowing an abandoned duplicate scaffold.
+
+    Usually the next boundary is the next marker selected for the recovered
+    trajectory. A special case occurs when an output prints a complete empty
+    template and then fills only a suffix of it. The optimal trajectory can then
+    use an early prefix (for example Facts/Implications) and a later filled suffix
+    (Provisional answer through Final answer). In that case, ending the prefix at
+    the *later* selected marker would incorrectly absorb the intervening empty
+    template and bridge prose.
+
+    Therefore, if the immediate next role has an earlier duplicate marker between
+    this role and the selected next marker, treat that earlier marker as a boundary
+    only when it is at least as strong a presentation marker as the selected one.
+    This preserves protection against weak body-internal role phrases while making
+    genuine numbered/Markdown/XML duplicate templates segment correctly.
+    """
     later = [match.start() for match in selected.values() if match.start() > start.start()]
-    return min(later) if later else len(document)
+    end = min(later) if later else len(document)
+
+    try:
+        index = CONTENT_TAGS.index(tag)
+    except ValueError as exc:
+        raise AssertionError(f"unknown protocol role: {tag}") from exc
+    if index + 1 >= len(CONTENT_TAGS):
+        return end
+
+    next_tag = CONTENT_TAGS[index + 1]
+    next_selected = selected.get(next_tag)
+    if next_selected is None or next_selected.start() <= start.start():
+        return end
+
+    selected_strength = _semantic_marker_strength(document, next_selected)
+    intervening = [
+        candidate.start()
+        for candidate in semantic_matches[next_tag]
+        if (
+            start.start() < candidate.start() < next_selected.start()
+            and _semantic_marker_strength(document, candidate) >= selected_strength
+        )
+    ]
+    if intervening:
+        end = min(end, min(intervening))
+    return end
 
 
 def recover_protocol(raw: str, choices: Mapping[str, str]) -> RecoveredProtocol:
@@ -1682,7 +1795,13 @@ def recover_protocol(raw: str, choices: Mapping[str, str]) -> RecoveredProtocol:
             recovered[tag] = ""
             continue
         end = (
-            _selected_segment_end(document, semantic_first, start)
+            _selected_segment_end(
+                document,
+                semantic_first,
+                semantic_matches,
+                tag,
+                start,
+            )
             if coherent is not None
             else _segment_end(document, semantic_matches, start)
         )

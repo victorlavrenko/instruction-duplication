@@ -1,4 +1,9 @@
-"""Deterministic content, structure, and repair-oriented measurements."""
+"""Deterministic content, structure, and repair-oriented measurements.
+
+Paper mapping: implements section completion, validated role completion, contrastive
+discussion, premature commitment, final-answer accuracy, and the all-eight diagnostic
+described in ``Experiment -> Measurements and Eligibility``. Lexical exposure is
+delegated to :mod:`instruction_duplication.lexical`."""
 
 from __future__ import annotations
 
@@ -73,8 +78,12 @@ class Judgment(TypedDict):
     required_section_count: int | None
     nontrivial_section_count: int | None
     substantive_role_count: int | None
+    validated_role_count: int | None
+    validated_role_completeness_score: float | None
     contrastive_discussion_count: int | None
     contrastive_discussion_score: float | None
+    validated_contrastive_discussion_count: int | None
+    validated_contrastive_discussion_score: float | None
     provisional_answer_discussed: float | None
     best_alternative_discussed: float | None
     decisive_distinction_discussed: float | None
@@ -82,6 +91,8 @@ class Judgment(TypedDict):
     reconsideration_discussed: float | None
     role_completeness_score: float | None
     all_roles_substantive: float | None
+    all_roles_validated_complete: float | None
+    validated_complete_role_scaffold: float | None
     roles_in_requested_order: float | None
     complete_role_scaffold: float | None
     role_facts_complete: float | None
@@ -90,6 +101,7 @@ class Judgment(TypedDict):
     role_best_alternative_complete: float | None
     role_decisive_distinction_complete: float | None
     role_answer_changing_change_complete: float | None
+    role_answer_changing_change_nontrivial: float | None
     role_reconsideration_complete: float | None
     role_final_answer_complete: float | None
     facts_tfidf_recall: float | None
@@ -158,6 +170,7 @@ COUNTERFACTUAL_CUES = re.compile(
     re.IGNORECASE,
 )
 COUNTERFACTUAL_TASK_REWRITE_RE = re.compile(
+    # Explicitly changing what the item asks is not a change to the patient's case.
     r"\b(?:rephras(?:e|ed|ing)|rewrit(?:e|ten|ing)|chang(?:e|ed|ing)|modif(?:y|ied|ying))\b"
     r"[^.;\n]{0,60}\b(?:stem|question)\b[^.;\n]{0,80}\b(?:ask|focus|word|phrasing|intent)\b"
     r"|\b(?:if\s+)?the\s+(?:stem|question)\s+(?:were\s+|was\s+)?"
@@ -166,9 +179,25 @@ COUNTERFACTUAL_TASK_REWRITE_RE = re.compile(
     r"(?:asked|asking|focused)\b"
     r"|\b(?:shift|change|alter)\w*\b[^.;\n]{0,60}\b"
     r"(?:question(?:'s)?\s+(?:focus|intent)|focus\s+of\s+(?:the\s+)?question|"
-    r"what\s+the\s+question\s+asks)\b",
+    r"what\s+the\s+question\s+asks)\b"
+    # Natural rewrites that escaped the older patterns: "question were changed to:\n"
+    # followed by a new WH-task, or "question specifically asked about ...".
+    r"|\b(?:if\s+)?(?:the\s+)?(?:stem|question)\s+"
+    r"(?:were\s+|was\s+|is\s+|had\s+)?(?:rephrased|rewritten|changed|modified)\s+to\s*"
+    r"[:,'\"“”\s-]*(?:ask\b|focus\b|word\b|which\b|what\b|who\b|when\b|where\b|how\b)"
+    r"|\b(?:if\s+)?(?:the\s+)?(?:stem|question)\s+(?:specifically\s+)?"
+    r"(?:asks?|asked|asking)\s+(?:about|for|which|what|who|when|where|how)\b"
+    r"|\b(?:if\s+)?(?:the\s+)?(?:stem|question)\s+(?:had\s+)?stated\s*"
+    r"[,:'\"“”\s-]+(?:which|what|who|when|where|how)\b"
+    r"|\b(?:if\s+)?(?:the\s+)?(?:stem|question)\s+specified\s*"
+    r"[,:'\"“”\s-]*(?:which|what|who|when|where|how)\b"
+    # Rewriting an answer choice is likewise not a patient/case counterfactual.
+    r"|\b(?:if\s+)?(?:option|choice)\s+\(?(?-i:[A-Z])\)?[^.;\n]{0,45}"
+    r"\b(?:had\s+said|were\s+(?:changed|rewritten|rephrased)|"
+    r"was\s+(?:changed|rewritten|rephrased))\b",
     re.IGNORECASE,
 )
+
 COUNTERFACTUAL_TARGET_RES = (
     # Causal target after an explicit make/favor construction.  Bare option letters
     # are allowed only in such target positions so pronouns (notably option I) do
@@ -1072,19 +1101,159 @@ def _explicit_counterfactual_winners(
     return winners
 
 
+HUMAN_VALIDATED_COUNTERFACTUAL_JUDGE = "v1"
+PAPER_VALIDATED_ROLE_AGGREGATE = "v1"
+
+COUNTERFACTUAL_SCENARIO_SPLIT_RE = re.compile(
+    # Do not split on the period in a compact option label such as "F. Release".
+    r"(?<![A-Z]\.)(?<=[.!?])\s+|\n{2,}"
+)
+COUNTERFACTUAL_AMBIGUOUS_OR_RE = re.compile(
+    r"\b(?-i:([A-Z]))\.\s*[^;\n]{0,120}\bor\s+"
+    r"(?-i:([A-Z]))\.\s*[^;\n]{0,120}"
+    r"\b(?:would|could|might)\b[^;\n]{0,80}"
+    r"\b(?:best|preferred|most\s+likely|more\s+likely)\b",
+    re.IGNORECASE,
+)
+
+
+def _counterfactual_scenarios(text: str) -> tuple[str, ...]:
+    """Split alternative hypothetical branches without splitting option labels."""
+    scenarios = tuple(
+        part.strip() for part in COUNTERFACTUAL_SCENARIO_SPLIT_RE.split(text) if part.strip()
+    )
+    return scenarios or (text.strip(),)
+
+
+def _normalized_choice_aliases(choice: str) -> tuple[str, ...]:
+    """Return conservative aliases for detecting a named alternative in prose.
+
+    The only normalization beyond the existing answer normalizer is removal of a
+    leading determiner/possessive, allowing e.g. choice text ``His father`` to match
+    ``father``.  We do not invent abbreviations or semantic synonyms here.
+    """
+    normalized = normalize_text(choice).casefold().strip()
+    aliases = {normalized} if normalized else set()
+    tokens = normalized.split()
+    while tokens and tokens[0] in {"the", "a", "an", "his", "her", "their"}:
+        tokens = tokens[1:]
+    if tokens:
+        aliases.add(" ".join(tokens))
+    return tuple(sorted((alias for alias in aliases if len(alias) >= 3), key=len, reverse=True))
+
+
+def _natural_second_best_target(
+    scenario: str,
+    choices: Mapping[str, str],
+    second_best_option: str,
+) -> bool:
+    """Recognize natural winner language missed by the strict option regexes."""
+    normalized = normalize_text(scenario).casefold()
+    aliases = _normalized_choice_aliases(choices[second_best_option])
+    for alias in aliases:
+        escaped = re.escape(alias)
+        patterns = (
+            # "would strongly suggest Crohn's disease over ulcerative colitis"
+            rf"\b(?:would|could|might)\b.{{0,55}}\b"
+            rf"(?:suggest|favor|favour|support|point\s+to)\s+(?:the\s+)?{escaped}\b",
+            # "previous attempt would become the most significant risk factor"
+            rf"\b{escaped}\b.{{0,110}}\b(?:would|could|might)\b.{{0,65}}\b"
+            rf"(?:become|be|represent)\b.{{0,30}}\b"
+            rf"(?:best|preferred|better|most\s+likely|more\s+likely|"
+            rf"most\s+significant|strongest)\b",
+            # "shift the diagnosis/preference towards Crohn's disease"
+            rf"\b(?:shift|change|switch)\b.{{0,40}}\b"
+            rf"(?:diagnosis|answer|preference)\b.{{0,20}}\b"
+            rf"(?:to|toward|towards)\s+(?:the\s+)?{escaped}\b",
+        )
+        if any(re.search(pattern, normalized, re.IGNORECASE) for pattern in patterns):
+            return True
+
+    # Safe anaphora: this role is evaluated together with a separately recovered,
+    # declared best alternative.  Saying the "best alternative" would become/favor
+    # the winner therefore identifies that recovered option without guessing medicine.
+    return bool(
+        re.search(
+            r"\b(?:make|making)\s+(?:the\s+)?best\s+alternative\b.{0,100}\b"
+            r"(?:best|preferred|correct|better|most\s+likely)\b",
+            normalized,
+            re.IGNORECASE,
+        )
+        or re.search(
+            r"\b(?:change|shift|switch)\s+(?:the\s+)?answer\s+to\s+"
+            r"(?:favor|favour)\s+(?:the\s+)?best\s+alternative\b",
+            normalized,
+            re.IGNORECASE,
+        )
+        or re.search(
+            r"\bbest\s+alternative\b.{0,90}\b(?:would|could|might)\b.{0,65}\b"
+            r"(?:become|be)\b.{0,30}\b(?:best|preferred|better|most\s+likely)\b",
+            normalized,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _scenario_has_ambiguous_joint_winner(
+    scenario: str,
+    choices: Mapping[str, str],
+    second_best_option: str,
+) -> bool:
+    """Reject a single hypothetical branch that offers two co-winners.
+
+    Separate later branches are allowed.  For example, a response can first give a
+    valid change that makes its stated alternative win and then discuss another
+    hypothetical.  What fails is ``F or H would become the best answer`` inside the
+    same proposed change.
+    """
+    for match in COUNTERFACTUAL_AMBIGUOUS_OR_RE.finditer(scenario):
+        left, right = (group.upper() for group in match.groups())
+        if left in choices and right in choices and left != right and second_best_option in {left, right}:
+            return True
+    return False
+
+
+def _second_best_has_winning_scenario(
+    text: str,
+    choices: Mapping[str, str],
+    second_best_option: str,
+) -> bool:
+    """Require at least one unambiguous hypothetical where the declared alternative wins."""
+    for scenario in _counterfactual_scenarios(text):
+        if _scenario_has_ambiguous_joint_winner(scenario, choices, second_best_option):
+            continue
+        winners = _explicit_counterfactual_winners(scenario, choices)
+        other_winners = winners - {second_best_option}
+        if second_best_option in winners and not other_winners:
+            return True
+        # If a strict regex found a *different* winner in this same branch, do not
+        # override it with looser anaphoric/choice-text matching.
+        if other_winners:
+            continue
+        if _natural_second_best_target(scenario, choices, second_best_option):
+            return True
+    return False
+
+
 def _case_specific_counterfactual(
     question: Question,
     text: str,
     second_best_option: str | None,
 ) -> bool:
-    """Require a concrete counterfactual rather than a protocol-text echo.
+    """Judge the requested answer-changing counterfactual as an observable operation.
 
-    A valid answer-changing change often introduces a *new* hypothetical fact, so it
-    need not literally repeat the original stem or the second-best choice text. The
-    role judge therefore checks for substantive counterfactual language plus at least
-    two non-boilerplate content terms. Stem/choice overlap remains sufficient, but is
-    not required. This deliberately tests whether a concrete change was proposed; it
-    does not attempt to judge the medical truth of that hypothetical.
+    PASS requires all of the following, without judging medical truth:
+    1. a substantive hypothetical rather than boilerplate;
+    2. a change to case content, not a rewrite of the task or answer choices;
+    3. a valid, separately declared best alternative;
+    4. at least one unambiguous hypothetical branch in which that exact alternative
+       is said to become/furnish the winning answer; and
+    5. concrete content beyond merely naming the alternative.
+
+    This definition follows the atomic human-validation instruction.  In particular,
+    ``X or Y would become the best answer`` does not complete the role when X is the
+    declared alternative, while natural wording such as ``skip lesions would strongly
+    suggest Crohn's disease over ulcerative colitis`` does complete it.
     """
     if not (_informative(text, 7) and COUNTERFACTUAL_CUES.search(text)):
         return False
@@ -1092,24 +1261,24 @@ def _case_specific_counterfactual(
         return False
     if second_best_option is None or second_best_option not in question.choices:
         return False
-
-    winners = _explicit_counterfactual_winners(text, question.choices)
-    if second_best_option not in winners:
+    if not _second_best_has_winning_scenario(text, question.choices, second_best_option):
         return False
 
     specific = {token for token in content_tokens(text) if token not in COUNTERFACTUAL_META_TOKENS}
     choice_terms = set(content_tokens(question.choices[second_best_option]))
     introduced = specific - choice_terms
     if len(introduced) < 2 and not (
-        second_best_option in winners
-        and set(content_tokens(text)).intersection(choice_terms)
-        and RATIONALE_CUES.search(text)
+        set(content_tokens(text)).intersection(choice_terms) and RATIONALE_CUES.search(text)
     ):
         return False
+
+    # Keep the construct case-grounded.  New hypothetical findings are allowed and
+    # often absent from the original stem, so strong literal overlap is not required;
+    # the introduced-content test above supplies the complementary guard.
     return bool(
         score_anchor_recall(question.stem, text) >= 0.05
         or specific.intersection(choice_terms)
-        or winners
+        or len(introduced) >= 3
     )
 
 
@@ -1148,8 +1317,12 @@ def _failure_judgment(instructed: bool, status: str, inventory: QuestionFacts) -
         "required_section_count": 0 if instructed else None,
         "nontrivial_section_count": 0 if instructed else None,
         "substantive_role_count": 0 if instructed else None,
+        "validated_role_count": 0 if instructed else None,
+        "validated_role_completeness_score": all_question_zero,
         "contrastive_discussion_count": 0 if instructed else None,
         "contrastive_discussion_score": all_question_zero,
+        "validated_contrastive_discussion_count": 0 if instructed else None,
+        "validated_contrastive_discussion_score": all_question_zero,
         "provisional_answer_discussed": all_question_zero,
         "best_alternative_discussed": all_question_zero,
         "decisive_distinction_discussed": all_question_zero,
@@ -1157,6 +1330,8 @@ def _failure_judgment(instructed: bool, status: str, inventory: QuestionFacts) -
         "reconsideration_discussed": all_question_zero,
         "role_completeness_score": all_question_zero,
         "all_roles_substantive": all_question_zero,
+        "all_roles_validated_complete": all_question_zero,
+        "validated_complete_role_scaffold": all_question_zero,
         "roles_in_requested_order": all_question_zero,
         "complete_role_scaffold": all_question_zero,
         "role_facts_complete": all_question_zero,
@@ -1165,6 +1340,7 @@ def _failure_judgment(instructed: bool, status: str, inventory: QuestionFacts) -
         "role_best_alternative_complete": all_question_zero,
         "role_decisive_distinction_complete": all_question_zero,
         "role_answer_changing_change_complete": all_question_zero,
+        "role_answer_changing_change_nontrivial": all_question_zero,
         "role_reconsideration_complete": all_question_zero,
         "role_final_answer_complete": all_question_zero,
         "facts_tfidf_recall": zero,
@@ -1259,8 +1435,12 @@ def _baseline_judgment(
         "required_section_count": None,
         "nontrivial_section_count": None,
         "substantive_role_count": None,
+        "validated_role_count": None,
+        "validated_role_completeness_score": None,
         "contrastive_discussion_count": None,
         "contrastive_discussion_score": None,
+        "validated_contrastive_discussion_count": None,
+        "validated_contrastive_discussion_score": None,
         "provisional_answer_discussed": None,
         "best_alternative_discussed": None,
         "decisive_distinction_discussed": None,
@@ -1268,6 +1448,8 @@ def _baseline_judgment(
         "reconsideration_discussed": None,
         "role_completeness_score": None,
         "all_roles_substantive": None,
+        "all_roles_validated_complete": None,
+        "validated_complete_role_scaffold": None,
         "roles_in_requested_order": None,
         "complete_role_scaffold": None,
         "role_facts_complete": None,
@@ -1276,6 +1458,7 @@ def _baseline_judgment(
         "role_best_alternative_complete": None,
         "role_decisive_distinction_complete": None,
         "role_answer_changing_change_complete": None,
+        "role_answer_changing_change_nontrivial": None,
         "role_reconsideration_complete": None,
         "role_final_answer_complete": None,
         "facts_tfidf_recall": None,
@@ -1766,6 +1949,16 @@ def _instructed_judgment(
         answer,
     )
     nontrivial = _nontrivial_sections(recovered)
+    # Paper-facing validated completion uses seven semantic role checks plus a
+    # deliberately simpler Step-6 observable: non-trivial generated content.
+    # The strict semantic Step-6 result remains exported as exploratory.
+    validated_substantive = dict(substantive)
+    validated_substantive["answer_changing_change"] = bool(
+        nontrivial["answer_changing_change"]
+    )
+    validated_role_count = sum(bool(value) for value in validated_substantive.values())
+    validated_role_completeness_score = validated_role_count / len(CONTENT_TAGS)
+    all_roles_validated_complete = bool(all(validated_substantive.values()))
     section_diagnostics = _section_diagnostics(recovered, substantive, nontrivial)
     trajectory_complete = _trajectory_complete(recovered, question.choices)
     semantic_trajectory_complete = _semantic_trajectory_complete(recovered, question.choices)
@@ -1850,11 +2043,29 @@ def _instructed_judgment(
     )
     contrastive_discussion_count = sum(bool(value) for value in contrastive_discussion_components)
     contrastive_discussion_score = contrastive_discussion_count / len(contrastive_discussion_components)
+    validated_contrastive_discussion_components = (
+        validated_substantive["provisional_answer"],
+        validated_substantive["second_best"],
+        validated_substantive["decisive_fact"],
+        validated_substantive["answer_changing_change"],
+        validated_substantive["rereasoning"],
+    )
+    validated_contrastive_discussion_count = sum(
+        bool(value) for value in validated_contrastive_discussion_components
+    )
+    validated_contrastive_discussion_score = (
+        validated_contrastive_discussion_count / len(validated_contrastive_discussion_components)
+    )
     role_completeness_score = section_substantive_fraction
     all_roles_substantive = bool(all(substantive.values()))
     roles_in_requested_order = bool(recovered.semantic_ordered_starts)
     complete_role_scaffold = bool(
         all_roles_substantive
+        and all(section_diagnostics["unique"].values())
+        and roles_in_requested_order
+    )
+    validated_complete_role_scaffold = bool(
+        all_roles_validated_complete
         and all(section_diagnostics["unique"].values())
         and roles_in_requested_order
     )
@@ -1898,8 +2109,12 @@ def _instructed_judgment(
         "required_section_count": required_section_count,
         "nontrivial_section_count": nontrivial_section_count,
         "substantive_role_count": substantive_role_count,
+        "validated_role_count": validated_role_count,
+        "validated_role_completeness_score": validated_role_completeness_score,
         "contrastive_discussion_count": contrastive_discussion_count,
         "contrastive_discussion_score": contrastive_discussion_score,
+        "validated_contrastive_discussion_count": validated_contrastive_discussion_count,
+        "validated_contrastive_discussion_score": validated_contrastive_discussion_score,
         "provisional_answer_discussed": float(substantive["provisional_answer"]),
         "best_alternative_discussed": float(substantive["second_best"]),
         "decisive_distinction_discussed": float(substantive["decisive_fact"]),
@@ -1907,6 +2122,8 @@ def _instructed_judgment(
         "reconsideration_discussed": float(substantive["rereasoning"]),
         "role_completeness_score": role_completeness_score,
         "all_roles_substantive": float(all_roles_substantive),
+        "all_roles_validated_complete": float(all_roles_validated_complete),
+        "validated_complete_role_scaffold": float(validated_complete_role_scaffold),
         "roles_in_requested_order": float(roles_in_requested_order),
         "complete_role_scaffold": float(complete_role_scaffold),
         "role_facts_complete": float(substantive["facts"]),
@@ -1915,6 +2132,7 @@ def _instructed_judgment(
         "role_best_alternative_complete": float(substantive["second_best"]),
         "role_decisive_distinction_complete": float(substantive["decisive_fact"]),
         "role_answer_changing_change_complete": float(substantive["answer_changing_change"]),
+        "role_answer_changing_change_nontrivial": float(validated_substantive["answer_changing_change"]),
         "role_reconsideration_complete": float(substantive["rereasoning"]),
         "role_final_answer_complete": float(substantive["final_answer"]),
         "trajectory_criteria": {

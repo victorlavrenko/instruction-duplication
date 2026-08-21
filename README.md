@@ -98,7 +98,7 @@ instruction-duplication analyze --workspace run-2026-08-12
 
 The frozen run archive will be published as a separate release artifact together with the paper.
 
-For the exact August 12 paper-run model IDs, provider routes, output ceilings, seeds, dataset revisions, and statistical settings, see [docs/paper-run-parameters.md](docs/paper-run-parameters.md). The broader AAAI reproducibility mapping and development-setting rationale are in [docs/reproducibility.md](docs/reproducibility.md).
+For the exact August 12 paper-run model IDs, provider routes, output ceilings, seeds, dataset revisions, and statistical settings, see [docs/paper-run-parameters.md](docs/paper-run-parameters.md). For the complete final parameter appendix, development-choice record, and paper-to-code map, see [docs/FINAL_EXPERIMENT_CONFIGURATION.md](docs/FINAL_EXPERIMENT_CONFIGURATION.md), [docs/DEVELOPMENT_CHOICES.md](docs/DEVELOPMENT_CHOICES.md), and [docs/PAPER_IMPLEMENTATION_MAP.md](docs/PAPER_IMPLEMENTATION_MAP.md). The shortest reproduction path is [REPRODUCE.md](REPRODUCE.md); the broader AAAI reproducibility rationale is in [docs/reproducibility.md](docs/reproducibility.md).
 
 For double-blind review, do **not** link this author-identifying public repository from the manuscript. Build an anonymized supplementary code/data ZIP from a local checkout plus the frozen run:
 
@@ -222,3 +222,16 @@ python -m pip install -e ".[dev,test]"
 ```
 
 Then run the test suite and see [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/development.md](docs/development.md).
+
+## AAAI-27 frozen robustness reanalysis
+
+The paper-facing robustness checks added after the judge was frozen do **not** regenerate or rejudge any response. They operate on `results/cells-and-judgments.jsonl`, the frozen question QC file, and the already frozen human-audit artifacts:
+
+```bash
+PYTHONPATH=src python tools/aaai27_robustness_analysis.py \
+  --workspace /path/to/run \
+  --human-dir /path/to/human-validation \
+  --out /path/to/aaai27-robustness-analysis.json
+```
+
+The tool reports the full eight-condition factorial, additive higher-copy residuals, pooled and trailing-copy TF-IDF length adjustments, split generation-status diagnostics, raw accuracy numerators/denominators, TF-IDF eligibility provenance, and human-audit sign/orientation checks. These are post-hoc robustness analyses on the frozen 3.0.13 judgments; they are not changes to the generation protocol or deterministic judge.

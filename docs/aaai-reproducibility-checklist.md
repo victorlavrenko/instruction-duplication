@@ -25,18 +25,18 @@ This file maps the repository and frozen paper-run artifacts to the AAAI reprodu
 ## Computational experiments
 
 - 4.1 Computational experiments included: **yes**.
-- 4.2 Development hyperparameters and selection criteria: **partial**. There was no broad outcome-driven hyperparameter sweep. `docs/reproducibility.md` records which parameters were fixed, which were experimental factors, which settings were smoke-calibrated, and the criterion for final output ceilings/routes. Marking this `partial` is more accurate than inventing ranges that were never tried.
+- 4.2 Development hyperparameters and selection criteria: **yes** — `docs/DEVELOPMENT_CHOICES.md` records, for every actual experimental/configuration parameter, the values/ranges evaluated (including singleton/no-sweep settings), final value, and selection criterion. Post-generation judge refinement is explicitly documented as measurement-method development rather than effect-maximizing hyperparameter tuning.
 - 4.3 Preprocessing code included: **yes**, when the supplementary ZIP built by `scripts/build_aaai_supplement.py` is uploaded.
 - 4.4 Experimental/analysis source included: **yes**, when that ZIP is uploaded.
 - 4.5 Public research-usable license: **yes** — MIT.
-- 4.6 New-method implementation comments with paper references: **partial/yes depending on checklist interpretation**. The implementation is extensively documented and `docs/reproducibility.md` provides an explicit source-to-paper section map; several modules also carry focused docstrings/comments. The repository does not artificially annotate every helper function with paper section numbers.
+- 4.6 New-method implementation comments with paper references: **yes** — core implementation modules contain concise paper-section references and `docs/PAPER_IMPLEMENTATION_MAP.md` maps each major method/result to exact source files and functions.
 - 4.7 Random seeds described: **yes** — question selection seed and deterministic per-cell generation seed are documented; resampling procedures use fixed seeds in the analysis implementation/artifacts.
-- 4.8 Computing infrastructure: **partial by unavoidable provider opacity**. Exact local software environment/platform and exact hosted model/provider routes are recorded. Hosted providers did not expose physical GPU/CPU/RAM details, so those cannot be truthfully supplied.
+- 4.8 Computing infrastructure: **partial** — local OS/Python/software and exact hosted routes are frozen, but historical serverless providers did not expose per-request physical GPU/CPU/RAM. See `docs/PROVIDER_INFRASTRUCTURE_VISIBILITY.md`; no hardware is invented.
 - 4.9 Evaluation metrics formally described and motivated: **yes** — paper plus `docs/experiment.md`.
 - 4.10 Number of algorithm runs stated: **yes** — one generation per scheduled model-question-condition cell; failures/truncations retained under ITT conventions.
 - 4.11 Distributional/confidence analysis: **yes** — question-clustered confidence intervals and model/dataset analyses.
 - 4.12 Statistical significance tests: **yes** — paired question-level sign-flip tests with declared Holm corrections.
-- 4.13 Final model/algorithm hyperparameters: **yes** — `docs/paper-run-parameters.md` plus frozen `manifest.json`, `config/models.json`, `config/routes.json`, `config/environment.json` and `config/preflight.json` in the paper-run artifact.
+- 4.13 Final model/algorithm hyperparameters: **yes** — `docs/FINAL_EXPERIMENT_CONFIGURATION.md` and its machine-readable JSON companion list all shared and per-model final settings; frozen `manifest.json` and `config/` files remain authoritative provenance.
 
 ## Supplement contents required for the answers above
 

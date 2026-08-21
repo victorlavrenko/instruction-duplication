@@ -1,4 +1,9 @@
-"""Deterministic lexical exposure measurements for visible pre-answer reasoning."""
+"""Deterministic lexical exposure measurements for visible pre-answer reasoning.
+
+Paper mapping: implements ``Pre-provisional TF-IDF recall`` in ``Experiment ->
+Measurements and Eligibility``: the numerator is PubMed-IDF-weighted stem content
+recovered in Facts + Implications, capped by stem frequency; the denominator is the
+total weighted content of the source stem."""
 
 from __future__ import annotations
 

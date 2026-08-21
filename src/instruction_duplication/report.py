@@ -13,6 +13,8 @@ LABELS = {
     "nontrivial_section_count": "Required sections with non-trivial content (of 8)",
     "contrastive_discussion_count": "Provisional/contrastive stages substantively discussed (of 5)",
     "contrastive_discussion_score": "Provisional/contrastive discussion score",
+    "validated_contrastive_discussion_count": "Validated provisional/contrastive stages completed (of 5)",
+    "validated_contrastive_discussion_score": "Validated provisional/contrastive discussion score",
     "provisional_answer_discussed": "Provisional answer actually selected and explained",
     "best_alternative_discussed": "Best alternative actually selected and explained",
     "decisive_distinction_discussed": "Decisive distinction actually discussed",
@@ -20,17 +22,22 @@ LABELS = {
     "reconsideration_discussed": "Reconsideration actually performed",
     "identified_role_count": "Identifiable requested roles (of 8)",
     "unique_role_count": "Uniquely identifiable requested roles (of 8)",
-    "substantive_role_count": "Substantively completed reasoning roles (of 8)",
+    "substantive_role_count": "Substantively completed reasoning roles (of 8; exploratory semantic Step 6)",
+    "validated_role_count": "Roles meeting validated completion criteria (of 8)",
+    "validated_role_completeness_score": "Validated role-completion fraction",
     "role_completeness_score": "Substantive role-completion fraction",
-    "all_roles_substantive": "All 8 roles substantively completed",
+    "all_roles_substantive": "All 8 roles substantively completed (exploratory semantic Step 6)",
+    "all_roles_validated_complete": "All 8 roles meet validated completion criteria",
     "roles_in_requested_order": "All 8 roles present once in requested order",
-    "complete_role_scaffold": "Complete ordered substantive role scaffold",
+    "complete_role_scaffold": "Complete ordered substantive role scaffold (exploratory semantic Step 6)",
+    "validated_complete_role_scaffold": "Complete ordered validated role scaffold",
     "role_facts_complete": "Facts role substantive",
     "role_implications_complete": "Implications role substantive",
     "role_provisional_answer_complete": "Provisional-answer role substantive",
     "role_best_alternative_complete": "Best-alternative role substantive",
     "role_decisive_distinction_complete": "Decisive-distinction role substantive",
-    "role_answer_changing_change_complete": "What-would-change section substantive",
+    "role_answer_changing_change_complete": "What-would-change semantic completion (exploratory)",
+    "role_answer_changing_change_nontrivial": "What-would-change section has non-trivial content",
     "role_reconsideration_complete": "Reconsideration role substantive",
     "role_final_answer_complete": "Final-answer role substantive",
     "protocol_scaffold_complete": "Full format-neutral reasoning scaffold",
@@ -83,16 +90,16 @@ HEADLINE_MODEL_OUTCOMES = (
     "required_section_count",
     "nontrivial_section_count",
     "preprovisional_tfidf_recall",
-    "contrastive_discussion_score",
-    "substantive_role_count",
-    "all_roles_substantive",
-    "complete_role_scaffold",
+    "validated_contrastive_discussion_score",
+    "validated_role_count",
+    "all_roles_validated_complete",
+    "validated_complete_role_scaffold",
     "role_facts_complete",
     "role_implications_complete",
     "role_provisional_answer_complete",
     "role_best_alternative_complete",
     "role_decisive_distinction_complete",
-    "role_answer_changing_change_complete",
+    "role_answer_changing_change_nontrivial",
     "role_reconsideration_complete",
     "role_final_answer_complete",
     "preanswer_tfidf_recall",
@@ -606,14 +613,13 @@ def render_report(analysis: Mapping[str, object]) -> str:
         lines.append(f"  {condition}: {', '.join(rendered_parts)}")
     lines.append("")
     lines.append(
-        "The primary role-completeness outcome counts identifiable, substantive reasoning "
-        "roles and is independent of XML, Markdown, or heading punctuation. Presence, "
-        "uniqueness, order, each role's completion, lexical exposure, premature commitment, "
-        "generation success, and answer accuracy are reported separately rather than added "
-        "into a composite. TF-IDF and automatic fact/qualifier checks measure visible lexical "
-        "exposure, not medical truth. Length robustness reports both pre-answer content-token "
-        "count and credited TF-IDF mass per 100 content tokens. Accuracy uses the option or "
-        "unambiguous answer text in the Final answer role."
+        "Paper-facing validated role completion uses seven human-validated semantic role "
+        "judges plus a deliberately simple Step-6 observable: the identified What-would-change "
+        "section contains non-trivial generated content. The stricter semantic Step-6 "
+        "counterfactual judge is retained only as an exploratory diagnostic and does not enter "
+        "the validated aggregates. Presence, uniqueness, order, lexical exposure, premature "
+        "commitment, generation success, and answer accuracy remain separate measurements. "
+        "TF-IDF and automatic fact/qualifier checks measure visible lexical exposure, not medical truth."
     )
     return "\n".join(lines).rstrip() + "\n"
 
@@ -679,16 +685,16 @@ def render_paper_report(analysis: Mapping[str, object]) -> str:
         in {
             "identified_role_count",
             "unique_role_count",
-            "substantive_role_count",
-            "all_roles_substantive",
+            "validated_role_count",
+            "all_roles_validated_complete",
             "roles_in_requested_order",
-            "complete_role_scaffold",
+            "validated_complete_role_scaffold",
             "role_facts_complete",
             "role_implications_complete",
             "role_provisional_answer_complete",
             "role_best_alternative_complete",
             "role_decisive_distinction_complete",
-            "role_answer_changing_change_complete",
+            "role_answer_changing_change_nontrivial",
             "role_reconsideration_complete",
             "role_final_answer_complete",
         }
@@ -701,15 +707,15 @@ def render_paper_report(analysis: Mapping[str, object]) -> str:
         outcome: index
         for index, outcome in enumerate(
             (
-                "substantive_role_count",
-                "all_roles_substantive",
-                "complete_role_scaffold",
+                "validated_role_count",
+                "all_roles_validated_complete",
+                "validated_complete_role_scaffold",
                 "role_facts_complete",
                 "role_implications_complete",
                 "role_provisional_answer_complete",
                 "role_best_alternative_complete",
                 "role_decisive_distinction_complete",
-                "role_answer_changing_change_complete",
+                "role_answer_changing_change_nontrivial",
                 "role_reconsideration_complete",
                 "role_final_answer_complete",
                 "preanswer_tfidf_recall",
@@ -743,10 +749,10 @@ def render_paper_report(analysis: Mapping[str, object]) -> str:
                 f"({lexical['document_count']} abstracts), not frequencies from this sample."
             ),
             (
-                "  Judge v2 reports four core constructs separately: required-section presence, "
-                "non-trivial section content, PubMed-IDF lexical exposure before the provisional "
-                "answer, and substantive provisional/contrastive discussion. No composite score "
-                "is formed. The 2026-08-12 run was used to develop this judge and is exploratory."
+                "  Paper-facing validated role metrics use seven semantic role judges plus "
+                "non-trivial Step-6 content. The stricter semantic Step-6 counterfactual judge "
+                "is retained as an exploratory diagnostic because it did not generalize reliably "
+                "under blinded human validation. No medical-correctness judgment is implied."
             ),
             (
                 "  Role recognition accepts plain, numbered, Markdown/emphasized, or voluntarily "
