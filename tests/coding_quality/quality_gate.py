@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import io
 import re
+import subprocess
 import sys
 import tokenize
 from pathlib import Path
@@ -116,7 +117,7 @@ def inspect_repository() -> list[str]:
     errors = [
         f"{path.relative_to(ROOT)}: file should not be committed"
         for path in FORBIDDEN_REPOSITORY_PATHS
-        if path.exists()
+        if path.exists() and _is_tracked(path)
     ]
     storage_text = (SOURCE / "storage.py").read_text(encoding="utf-8")
     errors.extend(
@@ -125,6 +126,18 @@ def inspect_repository() -> list[str]:
         if name in storage_text
     )
     return errors
+
+
+def _is_tracked(path: Path) -> bool:
+    """Return whether Git tracks a forbidden file or anything below a directory."""
+    result = subprocess.run(
+        ["git", "ls-files", "--", path.relative_to(ROOT).as_posix()],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return bool(result.stdout.strip())
 
 
 def _python_files() -> list[Path]:

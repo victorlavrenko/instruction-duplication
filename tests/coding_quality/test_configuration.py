@@ -33,4 +33,3 @@ def test_async_test_dependency_is_declared() -> None:
     assert "pytest-asyncio" in pyproject
     assert "requirements-dev.lock" in workflow
     assert "pytest-asyncio" in (ROOT / "requirements-dev.lock").read_text(encoding="utf-8")
-

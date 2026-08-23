@@ -459,9 +459,7 @@ async def _probe_route(
     run_id = preflight_run_id or uuid.uuid4().hex
     payload = request_payload(model, cell, route)
     reservation = estimate_cost(route, payload) * 1.10
-    request_id = (
-        f"preflight:{run_id}:{model.id}:{route.backend}:{route.provider}:{probe_index}"
-    )
+    request_id = f"preflight:{run_id}:{model.id}:{route.backend}:{route.provider}:{probe_index}"
     logical_key = idempotency_key(request_id, "preflight")
     attempts: list[AttemptRecord] = []
     for attempt_number in range(1, transport_retries + 2):

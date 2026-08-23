@@ -20,7 +20,6 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-
 ROOT_FILES = (
     "README.md",
     "CONTRIBUTING.md",
@@ -151,10 +150,11 @@ def assert_anonymous(root: Path) -> None:
 
 
 def write_manifest(root: Path) -> None:
-    rows: list[str] = []
-    for path in sorted(root.rglob("*")):
-        if path.is_file():
-            rows.append(f"{sha256(path)}  {path.relative_to(root).as_posix()}")
+    rows = [
+        f"{sha256(path)}  {path.relative_to(root).as_posix()}"
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    ]
     (root / "SHA256SUMS").write_text("\n".join(rows) + "\n", encoding="utf-8")
 
 
@@ -233,7 +233,9 @@ def build(repo: Path, run: Path, output: Path) -> None:
         output.parent.mkdir(parents=True, exist_ok=True)
         if output.exists():
             output.unlink()
-        with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+        with zipfile.ZipFile(
+            output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
+        ) as archive:
             for path in sorted(root.rglob("*")):
                 if path.is_file():
                     archive.write(path, path.relative_to(root))

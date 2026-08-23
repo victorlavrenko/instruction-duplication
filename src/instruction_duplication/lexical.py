@@ -453,6 +453,11 @@ def _validated_abbreviations(reference_text: str) -> dict[str, tuple[str, ...]]:
     return result
 
 
+def validated_abbreviations(reference_text: str) -> dict[str, tuple[str, ...]]:
+    """Expose the validated abbreviation map for reproducibility-audit rendering."""
+    return _validated_abbreviations(reference_text)
+
+
 def _abbreviation_credit(reference_text: str, candidate_text: str) -> Counter[str]:
     """Credit only reviewed or explicitly paired abbreviations."""
     reference_tokens = anchor_tokens(reference_text)
@@ -491,6 +496,15 @@ def _candidate_counts(
             for term in expansion_terms:
                 counts[term] += 1
     return counts, len(canonical)
+
+
+def candidate_counts(
+    candidate: str,
+    stem_tokens: Sequence[str],
+    abbreviations: Mapping[str, tuple[str, ...]],
+) -> tuple[Counter[str], int]:
+    """Expose exact candidate-term counting for reproducibility-audit rendering."""
+    return _candidate_counts(candidate, stem_tokens, abbreviations)
 
 
 def _tfidf_weight(count: int, idf: float) -> float:

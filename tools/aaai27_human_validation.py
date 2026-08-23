@@ -19,16 +19,12 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
-import html
 import json
 import math
-import random
-import shutil
 import zipfile
 from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
 
 from instruction_duplication import audit, judge
 from instruction_duplication.io_utils import read_jsonl
@@ -41,12 +37,10 @@ STRATA = ("improvement", "degradation", "tie")
 
 # ---------- exact binomial design / inference ----------
 
+
 def binomial_upper_tail(n: int, k: int, p: float) -> float:
     """P[X >= k] for X~Binomial(n,p), computed without SciPy."""
-    return sum(
-        math.comb(n, i) * (p**i) * ((1.0 - p) ** (n - i))
-        for i in range(k, n + 1)
-    )
+    return sum(math.comb(n, i) * (p**i) * ((1.0 - p) ** (n - i)) for i in range(k, n + 1))
 
 
 def exact_design(
@@ -63,11 +57,7 @@ def exact_design(
         raise ValueError("alpha and power must lie in (0,1)")
     for n in range(1, max_n + 1):
         critical = next(
-            (
-                k
-                for k in range(0, n + 1)
-                if binomial_upper_tail(n, k, p0) <= alpha
-            ),
+            (k for k in range(n + 1) if binomial_upper_tail(n, k, p0) <= alpha),
             None,
         )
         if critical is None:
@@ -113,6 +103,7 @@ def clopper_pearson_lower_one_sided(
 
 # ---------- stable selection / exclusions ----------
 
+
 def stable_hash(seed: str, *parts: object) -> str:
     raw = seed + "\0" + "\0".join(str(part) for part in parts)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -126,8 +117,8 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def read_jsonl_objects(path: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
+def read_jsonl_objects(path: Path) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
     with path.open(encoding="utf-8") as handle:
         for line_no, line in enumerate(handle, start=1):
             if not line.strip():
@@ -196,7 +187,7 @@ def all8_stratum(candidate: Mapping[str, object]) -> str | None:
     return "tie"
 
 
-def load_spoiled_questions(path: Path | None) -> tuple[set[str], list[dict[str, Any]]]:
+def load_spoiled_questions(path: Path | None) -> tuple[set[str], list[dict[str, object]]]:
     if path is None:
         return set(), []
     rows = read_jsonl_objects(path)
@@ -270,11 +261,7 @@ def allocate_primary_by_pattern(
             excess += allocation[pattern] - counts[pattern]
             allocation[pattern] = counts[pattern]
     while excess:
-        spare = [
-            pattern
-            for pattern in counts
-            if allocation[pattern] < counts[pattern]
-        ]
+        spare = [pattern for pattern in counts if allocation[pattern] < counts[pattern]]
         if not spare:
             raise RuntimeError("not enough improvement cases for primary audit")
         spare.sort(
@@ -335,7 +322,6 @@ def choose_tie_role(candidate: Mapping[str, object], seed: str) -> dict[str, obj
         )
     )
     return tied[0]
-
 
 
 # ---------- human-facing source-term highlighting ----------
@@ -408,6 +394,7 @@ def source_coverage_html(
 
 # ---------- blinded task construction ----------
 
+
 def choice_map(row: Mapping[str, object]) -> dict[str, str]:
     value = row.get("choices")
     if not isinstance(value, Mapping):
@@ -423,7 +410,7 @@ def build_task(
     treatment_side: str,
     seed: str,
     lexical_reference: object,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, object], dict[str, object]]:
     control = candidate["control"]
     treatment = candidate["treatment"]
     assert isinstance(control, Mapping) and isinstance(treatment, Mapping)
@@ -440,7 +427,7 @@ def build_task(
         if not criteria:
             raise RuntimeError("non-tie all8 transition without changed role")
 
-    criterion_rows: list[dict[str, Any]] = []
+    criterion_rows: list[dict[str, object]] = []
     for item in criteria:
         role = str(item["role"])
         context = item["context"]
@@ -472,7 +459,8 @@ def build_task(
                     "no highlight. For Facts, any explicit multi-option answer-choice "
                     "list is removed before coverage is computed. Do not mechanically "
                     "count highlights: a valid paraphrase can still count."
-                    if coverage_a_html is not None else None
+                    if coverage_a_html is not None
+                    else None
                 ),
             }
         )
@@ -540,7 +528,7 @@ def assign_treatment_sides(
     return result
 
 
-def render_html(tasks: list[dict[str, Any]], audit_id: str) -> str:
+def render_html(tasks: list[dict[str, object]], audit_id: str) -> str:
     payload = json.dumps(tasks, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -647,6 +635,7 @@ state.index=nextUnrated(0);save();render();
 
 # ---------- export ----------
 
+
 def export_command(args: argparse.Namespace) -> int:
     design = exact_design(
         p0=args.p0,
@@ -672,10 +661,7 @@ def export_command(args: argparse.Namespace) -> int:
     lexical_reference = audit._load_lexical_reference(
         args.workspace / "results" / "aaai27-human-validation-audit.jsonl"
     )
-    old_audit_questions = {
-        str(row["question_id"])
-        for row in read_jsonl_objects(old_key_path)
-    }
+    old_audit_questions = {str(row["question_id"]) for row in read_jsonl_objects(old_key_path)}
     spoiled_questions, spoiled_rows = load_spoiled_questions(args.spoiled)
     excluded_questions = old_audit_questions | spoiled_questions
 
@@ -700,7 +686,10 @@ def export_command(args: argparse.Namespace) -> int:
         control = candidate["control"]
         treatment = candidate["treatment"]
         assert isinstance(control, Mapping) and isinstance(treatment, Mapping)
-        if numeric_judgment(control, ALL8_FIELD) == 1.0 and numeric_judgment(treatment, ALL8_FIELD) == 1.0:
+        if (
+            numeric_judgment(control, ALL8_FIELD) == 1.0
+            and numeric_judgment(treatment, ALL8_FIELD) == 1.0
+        ):
             ties.append(candidate)
 
     primary = allocate_primary_by_pattern(
@@ -734,8 +723,8 @@ def export_command(args: argparse.Namespace) -> int:
 
     sides = assign_treatment_sides(selected_items, seed=args.seed)
 
-    blind_rows: list[dict[str, Any]] = []
-    key_rows: list[dict[str, Any]] = []
+    blind_rows: list[dict[str, object]] = []
+    key_rows: list[dict[str, object]] = []
     for label, candidate in selected_items:
         task_id = stable_hash(
             VERSION,
@@ -782,9 +771,7 @@ def export_command(args: argparse.Namespace) -> int:
     audit_id = hashlib.sha256(audit_path.read_bytes()).hexdigest()[:24]
 
     primary_patterns = Counter(
-        tuple(row["changed_roles"])
-        for row in key_rows
-        if row["machine_stratum"] == "improvement"
+        tuple(row["changed_roles"]) for row in key_rows if row["machine_stratum"] == "improvement"
     )
     population_patterns = Counter(
         tuple(str(item["role"]) for item in role_differences(candidate))
@@ -920,7 +907,8 @@ def export_command(args: argparse.Namespace) -> int:
             ensure_ascii=False,
             indent=2,
             sort_keys=True,
-        ) + "\n",
+        )
+        + "\n",
         encoding="utf-8",
     )
     html_path.write_text(render_html(blind_rows, audit_id), encoding="utf-8")
@@ -932,7 +920,7 @@ probability that a human comparison confirmed the automatic direction among matc
 one-copy$\rightarrow$two-copy cases scored as completion improvements.  The sample
 size was the minimum required by an exact one-sided binomial design testing
 $H_0:p\leq {args.p0:.2f}$ against design alternative $p={args.p1:.2f}$ at
-$\alpha={args.alpha:.2f}$ with at least {100*args.power:.0f}\% power; this yielded
+$\alpha={args.alpha:.2f}$ with at least {100 * args.power:.0f}\% power; this yielded
 $n={primary_n}$ and a pre-specified rejection threshold of
 {int(design["critical_confirmations"])}/{primary_n} confirmations.  Automatic
 improvement cases were deterministically sampled by a frozen seed, proportionally
@@ -948,7 +936,7 @@ fixed.  Ratings were cryptographically frozen before the decoding key was opened
     commitment = {
         "human_audit_version": VERSION,
         "audit_id": audit_id,
-        "created_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "created_at_utc": dt.datetime.now(dt.UTC).isoformat(),
         "audit_sha256": sha256_file(audit_path),
         "design_sha256": sha256_file(schema_path),
         "exclusions_sha256": sha256_file(exclusions_path),
@@ -972,8 +960,7 @@ fixed.  Ratings were cryptographically frozen before the decoding key was opened
         f">={int(design['critical_confirmations'])}/{primary_n} confirmations"
     )
     print(
-        f"  achieved power at p={args.p1:.2f}: "
-        f"{100*float(design['achieved_power_at_p1']):.1f}%"
+        f"  achieved power at p={args.p1:.2f}: {100 * float(design['achieved_power_at_p1']):.1f}%"
     )
     print(
         f"  tasks: {len(key_rows)} = {primary_n} primary improvements + "
@@ -992,6 +979,7 @@ fixed.  Ratings were cryptographically frozen before the decoding key was opened
 
 # ---------- freeze ----------
 
+
 def freeze_command(args: argparse.Namespace) -> int:
     ratings = json.loads(args.ratings.read_text(encoding="utf-8"))
     design = json.loads(args.design.read_text(encoding="utf-8"))
@@ -1003,7 +991,9 @@ def freeze_command(args: argparse.Namespace) -> int:
     expected = int(design["sample"]["total_tasks"])
     rows = ratings.get("ratings")
     if not isinstance(rows, list) or len(rows) != expected:
-        raise SystemExit(f"expected {expected} ratings, found {len(rows) if isinstance(rows, list) else 'invalid'}")
+        raise SystemExit(
+            f"expected {expected} ratings, found {len(rows) if isinstance(rows, list) else 'invalid'}"
+        )
 
     valid = {"A", "B", "same", "cannot_tell"}
     seen: set[str] = set()
@@ -1023,13 +1013,13 @@ def freeze_command(args: argparse.Namespace) -> int:
         "human_audit_version": VERSION,
         "audit_id": ratings["audit_id"],
         "reviewer_id": reviewer,
-        "frozen_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "frozen_at_utc": dt.datetime.now(dt.UTC).isoformat(),
         "complete": True,
         "ratings": rows,
     }
-    payload = (
-        json.dumps(frozen, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    ).encode("utf-8")
+    payload = (json.dumps(frozen, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode(
+        "utf-8"
+    )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_bytes(payload)
     digest = hashlib.sha256(payload).hexdigest()
@@ -1042,6 +1032,7 @@ def freeze_command(args: argparse.Namespace) -> int:
 
 
 # ---------- score ----------
+
 
 def rating_ab(value: str) -> int | None:
     return {"A": 1, "B": -1, "same": 0, "cannot_tell": None}[value]
@@ -1063,12 +1054,9 @@ def score_command(args: argparse.Namespace) -> int:
     if len(key_rows) != int(design["sample"]["total_tasks"]):
         raise SystemExit("hidden key size does not match design")
 
-    ratings = {
-        str(row["task_id"]): str(row["rating"])
-        for row in ratings_doc["ratings"]
-    }
+    ratings = {str(row["task_id"]): str(row["rating"]) for row in ratings_doc["ratings"]}
 
-    decoded: list[dict[str, Any]] = []
+    decoded: list[dict[str, object]] = []
     for key in key_rows:
         task_id = str(key["task_id"])
         human_value = ratings.get(task_id)
@@ -1101,7 +1089,7 @@ def score_command(args: argparse.Namespace) -> int:
     critical = int(planned["critical_confirmations"])
     reject = successes >= critical
 
-    def sentinel_summary(label: str) -> dict[str, Any]:
+    def sentinel_summary(label: str) -> dict[str, object]:
         rows = [row for row in decoded if row["machine_stratum"] == label]
         return {
             "n": len(rows),
@@ -1130,8 +1118,7 @@ def score_command(args: argparse.Namespace) -> int:
             "cannot_tell": sum(row["human_rating"] == "cannot_tell" for row in primary),
             "same": sum(row["human_rating"] == "same" for row in primary),
             "opposite_direction": sum(
-                row["human_ab"] is not None
-                and row["human_ab"] == -row["machine_ab"]
+                row["human_ab"] is not None and row["human_ab"] == -row["machine_ab"]
                 for row in primary
             ),
         },
@@ -1167,10 +1154,10 @@ def score_command(args: argparse.Namespace) -> int:
         f"Rater: {ratings_doc.get('reviewer_id')}",
         "",
         "Primary exact test:",
-        f"  confirmations: {successes}/{n} ({100*successes/n:.1f}%)",
+        f"  confirmations: {successes}/{n} ({100 * successes / n:.1f}%)",
         f"  H0: p <= {p0:.2f}",
         f"  one-sided exact p-value: {p_value:.6g}",
-        f"  one-sided {(1-alpha)*100:.0f}% exact lower bound: {100*lower:.1f}%",
+        f"  one-sided {(1 - alpha) * 100:.0f}% exact lower bound: {100 * lower:.1f}%",
         f"  pre-specified critical value: {critical}/{n}",
         f"  primary validation criterion met: {'YES' if reject else 'NO'}",
         f"  SAME on primary tasks: {result['primary']['same']}",
@@ -1184,10 +1171,10 @@ def score_command(args: argparse.Namespace) -> int:
 
     criterion = "met" if reject else "was not met"
     tex = rf"""\paragraph{{Human-validation result.}}
-The blinded rater confirmed {successes}/{n} ({100*successes/n:.1f}\%) of the
+The blinded rater confirmed {successes}/{n} ({100 * successes / n:.1f}\%) of the
 pre-specified automatic completion improvements.  Under the exact one-sided test
 of $H_0:p\leq {p0:.2f}$, $p={p_value:.4g}$; the one-sided
-{100*(1-alpha):.0f}\% exact lower confidence bound was {100*lower:.1f}\%.
+{100 * (1 - alpha):.0f}\% exact lower confidence bound was {100 * lower:.1f}\%.
 The pre-specified validation criterion of at least {critical}/{n} confirmations
 {criterion}.  Degradation and tie cases were included only as blinded descriptive
 sentinels.
@@ -1202,6 +1189,7 @@ sentinels.
 
 
 # ---------- anonymous supplementary ZIP ----------
+
 
 def package_command(args: argparse.Namespace) -> int:
     required = [
@@ -1251,6 +1239,7 @@ No external repository link is required to inspect these artifacts.
 
 
 # ---------- CLI ----------
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(

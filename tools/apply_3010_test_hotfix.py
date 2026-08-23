@@ -10,6 +10,7 @@ judge introduced in 3.0.10. It only:
 The audit.py and regression-test file are supplied by the overlay itself. This
 script only patches .gitignore because that file is intentionally user-maintained.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -37,7 +38,7 @@ def main() -> int:
     required_markers = (
         'DISPLAY_STOPWORDS = TFIDF_STOPWORDS | {"not"}',
         '"skipped": True,',
-        'frozen human audit requires at least',
+        "frozen human audit requires at least",
     )
     missing = [marker for marker in required_markers if marker not in audit_text]
     if missing:

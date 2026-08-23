@@ -988,9 +988,14 @@ def test_nontrivial_count_is_separate_from_role_semantics(question, lexical_refe
 def test_bold_numbered_markdown_headings_are_structurally_neutral(question, lexical_reference):
     raw = valid_response(question)
     headings = (
-        "1. Facts", "2. Implications", "3. Provisional answer", "4. Best alternative",
-        "5. Decisive distinction", "6. What would change the answer",
-        "7. Reconsideration", "8. Final answer",
+        "1. Facts",
+        "2. Implications",
+        "3. Provisional answer",
+        "4. Best alternative",
+        "5. Decisive distinction",
+        "6. What would change the answer",
+        "7. Reconsideration",
+        "8. Final answer",
     )
     for heading in headings:
         raw = raw.replace(heading, f"### **{heading}**", 1)
@@ -1158,7 +1163,9 @@ def test_semantic_option_accepts_most_likely_cause_with_markdown_label(question,
     assert result["provisional_answer_discussed"] == 1.0
 
 
-def test_semantic_option_accepts_choice_text_followed_by_parenthesized_label(question, lexical_reference):
+def test_semantic_option_accepts_choice_text_followed_by_parenthesized_label(
+    question, lexical_reference
+):
     raw = valid_response(question).replace(
         f"Option {question.gold}, {question.gold_text}, is provisional because it best fits the facts.",
         f"The most likely diagnosis is {question.gold_text} ({question.gold}) because it best explains the presentation.",
@@ -1256,15 +1263,19 @@ def test_e_g_abbreviation_is_not_misread_as_option_e(question, lexical_reference
 
 def test_explicit_revise_beats_later_implicit_answer_wording(question, lexical_reference):
     second = next(label for label in question.choices if label != question.gold)
-    raw = valid_response(question).replace(
-        f"Retain option {question.gold} after checking the stem again; the decisive evidence remains: {question.stem}",
-        (
-            "Upon reconsideration, I revise my provisional answer. "
-            f"Option {second} is now the more appropriate answer because the decisive evidence favors it."
-        ),
-    ).replace(
-        f"Option {question.gold}: {question.gold_text}",
-        f"Option {second}: {question.choices[second]}",
+    raw = (
+        valid_response(question)
+        .replace(
+            f"Retain option {question.gold} after checking the stem again; the decisive evidence remains: {question.stem}",
+            (
+                "Upon reconsideration, I revise my provisional answer. "
+                f"Option {second} is now the more appropriate answer because the decisive evidence favors it."
+            ),
+        )
+        .replace(
+            f"Option {question.gold}: {question.gold_text}",
+            f"Option {second}: {question.choices[second]}",
+        )
     )
     recovered = recover_protocol(raw, question.choices)
     assert recovered.semantic_decision == "revise"
@@ -1279,7 +1290,9 @@ def test_bare_uppercase_provisional_label_can_explicitly_remain_best(question, l
     assert result["reconsideration_discussed"] == 1.0
 
 
-def test_counterfactual_what_would_change_answer_to_declared_alternative(question, lexical_reference):
+def test_counterfactual_what_would_change_answer_to_declared_alternative(
+    question, lexical_reference
+):
     second = next(label for label in question.choices if label != question.gold)
     raw = valid_response(question).replace(
         f"If the decisive finding changed to support {question.choices[second]}, option {second} would become best.",
@@ -1292,20 +1305,26 @@ def test_counterfactual_what_would_change_answer_to_declared_alternative(questio
     assert result["answer_change_discussed"] == 1.0
 
 
-def test_counterfactual_predicate_does_not_attach_across_a_later_option(question, lexical_reference):
+def test_counterfactual_predicate_does_not_attach_across_a_later_option(
+    question, lexical_reference
+):
     labels = list(question.choices)
     provisional = question.gold
     second = next(label for label in labels if label != provisional)
     third = next(label for label in labels if label not in {provisional, second})
-    raw = valid_response(question).replace(
-        f"Option {second}, {question.choices[second]}, is the best alternative but loses on the decisive finding.",
-        f"Option {second}, {question.choices[second]}, is the best alternative because it is the closest competitor.",
-    ).replace(
-        f"If the decisive finding changed to support {question.choices[second]}, option {second} would become best.",
-        (
-            f"If a new persistent conductive hearing deficit were present, choice {third} would become a relevant feature, "
-            f"and choice {second} would be the correct answer."
-        ),
+    raw = (
+        valid_response(question)
+        .replace(
+            f"Option {second}, {question.choices[second]}, is the best alternative but loses on the decisive finding.",
+            f"Option {second}, {question.choices[second]}, is the best alternative because it is the closest competitor.",
+        )
+        .replace(
+            f"If the decisive finding changed to support {question.choices[second]}, option {second} would become best.",
+            (
+                f"If a new persistent conductive hearing deficit were present, choice {third} would become a relevant feature, "
+                f"and choice {second} would be the correct answer."
+            ),
+        )
     )
     result = judge(question, "completed", raw, "system", lexical_reference)
     assert result["answer_change_discussed"] == 1.0
@@ -1322,12 +1341,16 @@ def test_reconsideration_can_reaffirm_option_without_literal_retain(question, le
 
 def test_reconsideration_can_implicitly_revise_to_concluded_option(question, lexical_reference):
     second = next(label for label in question.choices if label != question.gold)
-    raw = valid_response(question).replace(
-        f"Retain option {question.gold} after checking the stem again; the decisive evidence remains: {question.stem}",
-        f"Upon reconsideration, option {second} seems more specific and characteristic because {question.stem}",
-    ).replace(
-        f"Option {question.gold}: {question.gold_text}",
-        f"Option {second}: {question.choices[second]}",
+    raw = (
+        valid_response(question)
+        .replace(
+            f"Retain option {question.gold} after checking the stem again; the decisive evidence remains: {question.stem}",
+            f"Upon reconsideration, option {second} seems more specific and characteristic because {question.stem}",
+        )
+        .replace(
+            f"Option {question.gold}: {question.gold_text}",
+            f"Option {second}: {question.choices[second]}",
+        )
     )
     recovered = recover_protocol(raw, question.choices)
     assert recovered.semantic_decision == "revise"
@@ -1335,7 +1358,9 @@ def test_reconsideration_can_implicitly_revise_to_concluded_option(question, lex
     assert result["reconsideration_discussed"] == 1.0
 
 
-def test_reconsideration_still_points_to_bare_labeled_provisional_is_retain(question, lexical_reference):
+def test_reconsideration_still_points_to_bare_labeled_provisional_is_retain(
+    question, lexical_reference
+):
     raw = valid_response(question).replace(
         f"Retain option {question.gold} after checking the stem again; the decisive evidence remains: {question.stem}",
         f"Reconsidering the facts, the findings still point strongly towards {question.gold}. {question.gold_text} as the diagnosis because {question.stem}",
@@ -1344,7 +1369,9 @@ def test_reconsideration_still_points_to_bare_labeled_provisional_is_retain(ques
     assert result["reconsideration_discussed"] == 1.0
 
 
-def test_reconsideration_remains_most_likely_can_retain_without_repeating_label(question, lexical_reference):
+def test_reconsideration_remains_most_likely_can_retain_without_repeating_label(
+    question, lexical_reference
+):
     raw = valid_response(question).replace(
         f"Retain option {question.gold} after checking the stem again; the decisive evidence remains: {question.stem}",
         f"Upon reconsideration, this diagnosis remains the most likely diagnosis because {question.stem}",
@@ -1395,7 +1422,9 @@ def test_key_distinction_subheading_inside_implications_is_not_decisive_role_dup
     assert result["contrastive_discussion_count"] == 5
 
 
-def test_provisional_option_label_before_best_answer_phrase_is_recovered(question, lexical_reference):
+def test_provisional_option_label_before_best_answer_phrase_is_recovered(
+    question, lexical_reference
+):
     raw = valid_response(question).replace(
         "Option A, Sudden sensorineural hearing loss, is provisional because it best fits the facts.",
         "A is the best answer. Sudden sensorineural hearing loss fits the sudden onset, unilateral hearing loss, and absent ear pain.",
@@ -1405,7 +1434,9 @@ def test_provisional_option_label_before_best_answer_phrase_is_recovered(questio
     assert result["provisional_answer_discussed"] == 1.0
 
 
-def test_second_best_option_label_before_best_alternative_phrase_is_recovered(question, lexical_reference):
+def test_second_best_option_label_before_best_alternative_phrase_is_recovered(
+    question, lexical_reference
+):
     raw = valid_response(question).replace(
         "Option B, Cerumen impaction, is the best alternative but loses on the decisive finding.",
         "B is the best alternative. Cerumen impaction could cause unilateral hearing loss but is less consistent with the sudden sensorineural pattern.",
@@ -1416,12 +1447,16 @@ def test_second_best_option_label_before_best_alternative_phrase_is_recovered(qu
 
 
 def test_reconsideration_body_decision_beats_heading_guidance_words(question, lexical_reference):
-    raw = valid_response(question).replace(
-        "7. Reconsideration\n",
-        "## 7. Reconsideration — State whether you retain or revise the provisional answer.\n",
-    ).replace(
-        "Retain option A after checking the stem again",
-        "Retain provisional answer A after checking the stem again because the sudden unilateral loss remains decisive",
+    raw = (
+        valid_response(question)
+        .replace(
+            "7. Reconsideration\n",
+            "## 7. Reconsideration — State whether you retain or revise the provisional answer.\n",
+        )
+        .replace(
+            "Retain option A after checking the stem again",
+            "Retain provisional answer A after checking the stem again because the sudden unilateral loss remains decisive",
+        )
     )
     result = judge(question, "completed", raw, "system", lexical_reference)
     assert result["rereasoning_decision"] == "retain"
@@ -1443,14 +1478,21 @@ def test_boxed_final_answer_dominates_incidental_numeric_choice_text(question, l
     raw = valid_response(question)
     raw = raw.replace("Option A, Sudden sensorineural hearing loss", "Option B, 1/10")
     raw = raw.replace("Option B, Cerumen impaction", "Option A, 9/100")
-    raw = raw.replace("Option A after checking the stem again", "Option B after checking the stem again")
-    raw = raw.replace("Option A: Sudden sensorineural hearing loss", "The calculation mentions 18/100 and 9/50. The final answer is: $\\boxed{B}$")
+    raw = raw.replace(
+        "Option A after checking the stem again", "Option B after checking the stem again"
+    )
+    raw = raw.replace(
+        "Option A: Sudden sensorineural hearing loss",
+        "The calculation mentions 18/100 and 9/50. The final answer is: $\\boxed{B}$",
+    )
     result = judge(numeric, "completed", raw, "system", lexical_reference)
     assert result["final_option"] == "B"
     assert result["accuracy"] == 1
 
 
-def test_decisive_paraphrase_with_explicit_contrast_counts_as_discussion(question, lexical_reference):
+def test_decisive_paraphrase_with_explicit_contrast_counts_as_discussion(
+    question, lexical_reference
+):
     raw = valid_response(question).replace(
         "The decisive fact is the sudden two-hour onset with no ear pain, which favors option A over option B.",
         "The decisive distinction is immediate diagnostic treatment versus conservative wax management; the acute pattern favors the former rather than the alternative.",
@@ -1479,7 +1521,9 @@ def test_semantic_reconsideration_can_retain_without_magic_keyword(question, lex
     assert result["reconsideration_discussed"] == 1.0
 
 
-def test_reconsideration_exact_choice_with_parenthetical_label_and_indefinite_article_is_retain(question, lexical_reference):
+def test_reconsideration_exact_choice_with_parenthetical_label_and_indefinite_article_is_retain(
+    question, lexical_reference
+):
     raw = valid_response(question).replace(
         "7. Reconsideration\nRetain the provisional answer.",
         "7. Reconsideration\nUpon reconsideration, Beta blockers (B) remains a plausible explanation.",
@@ -1497,7 +1541,9 @@ def test_reconsideration_option_stands_as_fundamental_is_retain(question, lexica
     assert result["rereasoning_decision"] == "retain"
 
 
-def test_reconsideration_provisional_answer_of_option_comprehensive_explanation_is_retain(question, lexical_reference):
+def test_reconsideration_provisional_answer_of_option_comprehensive_explanation_is_retain(
+    question, lexical_reference
+):
     raw = valid_response(question).replace(
         "7. Reconsideration\nRetain the provisional answer.",
         "7. Reconsideration\nUpon reconsideration, the provisional answer of B. Beta blockers seems to be the most comprehensive explanation.",
@@ -1506,7 +1552,9 @@ def test_reconsideration_provisional_answer_of_option_comprehensive_explanation_
     assert result["rereasoning_decision"] == "retain"
 
 
-def test_reconsideration_reaffirming_provisional_answer_without_option_is_retain(question, lexical_reference):
+def test_reconsideration_reaffirming_provisional_answer_without_option_is_retain(
+    question, lexical_reference
+):
     raw = valid_response(question).replace(
         "7. Reconsideration\nRetain the provisional answer.",
         "7. Reconsideration\nReaffirming the provisional answer: the original facts strongly support the initial choice.",
@@ -1545,7 +1593,9 @@ def test_negated_leading_role_label_can_be_self_corrected(question, lexical_refe
     assert recovered.semantic_provisional_option == question.gold
 
 
-def test_best_alternative_to_named_choice_could_be_considered_as_other_option(question, lexical_reference):
+def test_best_alternative_to_named_choice_could_be_considered_as_other_option(
+    question, lexical_reference
+):
     second = next(label for label in question.choices if label != question.gold)
     raw = valid_response(question).replace(
         f"Option {second}, {question.choices[second]}, is the best alternative but loses on the decisive finding.",
@@ -1555,7 +1605,9 @@ def test_best_alternative_to_named_choice_could_be_considered_as_other_option(qu
     assert recovered.semantic_second_best_option == second
 
 
-def test_explicit_retain_option_is_not_overridden_by_rejected_alternative(question, lexical_reference):
+def test_explicit_retain_option_is_not_overridden_by_rejected_alternative(
+    question, lexical_reference
+):
     second = next(label for label in question.choices if label != question.gold)
     raw = valid_response(question).replace(
         "7. Reconsideration\nRetain the provisional answer.",
@@ -1602,14 +1654,23 @@ def test_provisional_leading_choice_can_be_repaired_after_explicit_correction(qu
 
 
 def test_provisional_re_evaluate_overrides_rejected_leading_choice(question):
-    choices = {"A": "CT angiography", "B": "Doppler ultrasound", "C": "Plethysmography", "D": "MR angiography"}
+    choices = {
+        "A": "CT angiography",
+        "B": "Doppler ultrasound",
+        "C": "Plethysmography",
+        "D": "MR angiography",
+    }
     raw = """1. Facts\nContrast allergy and acute ischemia.\n2. Implications\nContrast limits imaging choices.\n3. Provisional answer\nA. CT angiography initially seems best. Wait — this contradicts the facts. A cannot be correct. Re-evaluate: Doppler avoids contrast. Therefore, the best answer is: B. Doppler ultrasound.\n4. Best alternative\nD. MR angiography is the best alternative.\n5. Decisive distinction\nDoppler is fastest and avoids contrast.\n6. What would change the answer\nIf Doppler were unavailable, D would win.\n7. Reconsideration\nRetain B because it avoids contrast.\n8. Final answer\nB. Doppler ultrasound\n"""
     recovered = recover_protocol(raw, choices)
     assert recovered.semantic_provisional_option == "B"
 
 
 def test_provisional_upon_reconsideration_can_replace_initial_labeled_choice(question):
-    choices = {"C": "Fetal abdominal wall defect", "I": "Neural tube defect", "A": "Inaccurate gestational age"}
+    choices = {
+        "C": "Fetal abdominal wall defect",
+        "I": "Neural tube defect",
+        "A": "Inaccurate gestational age",
+    }
     raw = """1. Facts\nElevated AFP at 16 weeks.\n2. Implications\nOpen fetal defects can elevate AFP.\n3. Provisional answer\nC. Fetal abdominal wall defect is plausible. But upon reconsideration: I. Neural tube defect — This is the provisional best answer because AFP screening targets open NTDs.\n4. Best alternative\nC. Fetal abdominal wall defect is the best alternative.\n5. Decisive distinction\nNTDs are the classic screening target.\n6. What would change the answer\nA visible abdominal wall defect would make C win.\n7. Reconsideration\nRetain I because the original facts still favor an NTD.\n8. Final answer\nI. Neural tube defect\n"""
     recovered = recover_protocol(raw, choices)
     assert recovered.semantic_provisional_option == "I"
@@ -1629,14 +1690,21 @@ def test_compact_provisional_label_best_describes_is_not_confused_with_other_cho
 
 
 def test_explicit_rejection_of_leading_provisional_allows_later_choice(question):
-    choices = {"B": "Tolvaptan", "D": "Fluid restriction", "A": "Head elevation", "C": "Desmopressin"}
+    choices = {
+        "B": "Tolvaptan",
+        "D": "Fluid restriction",
+        "A": "Head elevation",
+        "C": "Desmopressin",
+    }
     raw = """1. Facts\nMild euvolemic hyponatremia.\n2. Implications\nConservative SIADH treatment is appropriate.\n3. Provisional answer\nB. Tolvaptan is not the best initial choice. D. Fluid restriction is the most appropriate next step because it is first-line.\n4. Best alternative\nB. Tolvaptan is the best alternative but is not first-line.\n5. Decisive distinction\nSeverity favors fluid restriction.\n6. What would change the answer\nRefractory severe disease would make B preferable.\n7. Reconsideration\nRetain D.\n8. Final answer\nD. Fluid restriction\n"""
     recovered = recover_protocol(raw, choices)
     assert recovered.semantic_provisional_option == "D"
     assert recovered.semantic_second_best_option == "B"
 
 
-def test_provisional_discussion_without_choice_commitment_does_not_gain_option_from_salient_terms(question):
+def test_provisional_discussion_without_choice_commitment_does_not_gain_option_from_salient_terms(
+    question,
+):
     choices = {
         "A": "Decreased sense of temperature in the ipsilateral arm",
         "B": "Decreased strength of the contralateral leg",
@@ -1649,7 +1717,10 @@ def test_provisional_discussion_without_choice_commitment_does_not_gain_option_f
 
 
 def test_reevaluating_cue_can_replace_initial_provisional_choice(question):
-    choices = {"B": "Hypothesis testing cannot be performed", "D": "Participants act as their own controls"}
+    choices = {
+        "B": "Hypothesis testing cannot be performed",
+        "D": "Participants act as their own controls",
+    }
     raw = """1. Facts\nA descriptive case series.\n2. Implications\nThere is no control group.\n3. Provisional answer\nD. Participants act as their own controls. However, reevaluating for a better fit: B. Hypothesis testing cannot be performed is the better answer.\n4. Best alternative\nD. Participants act as their own controls is the best alternative.\n5. Decisive distinction\nDescriptive design prevents hypothesis testing.\n6. What would change the answer\nA before-after intervention could make D fit.\n7. Reconsideration\nRetain B.\n8. Final answer\nB. Hypothesis testing cannot be performed\n"""
     recovered = recover_protocol(raw, choices)
     assert recovered.semantic_provisional_option == "B"
@@ -1657,7 +1728,10 @@ def test_reevaluating_cue_can_replace_initial_provisional_choice(question):
 
 
 def test_unpunctuated_leading_option_is_validated_by_choice_text(question):
-    choices = {"C": "Circumscribed granuloma with epithelioid cells and Langhans cells", "D": "Granulomatous inflammation is also seen in histoplasmosis"}
+    choices = {
+        "C": "Circumscribed granuloma with epithelioid cells and Langhans cells",
+        "D": "Granulomatous inflammation is also seen in histoplasmosis",
+    }
     raw = """1. Facts\nApical TB pattern.\n2. Implications\nGranulomatous inflammation.\n3. Provisional answer\nC Best describes the inflammation; epithelioid cells and Langhans cells support it.\n4. Best alternative\nD Granulomatous inflammation is also seen in histoplasmosis. It is less suitable because the stem favors TB.\n5. Decisive distinction\nLanghans cells favor C.\n6. What would change the answer\nHistoplasma exposure would favor D.\n7. Reconsideration\nRetain C.\n8. Final answer\nC. Circumscribed granuloma with epithelioid cells and Langhans cells\n"""
     recovered = recover_protocol(raw, choices)
     assert recovered.semantic_provisional_option == "C"
@@ -1665,7 +1739,10 @@ def test_unpunctuated_leading_option_is_validated_by_choice_text(question):
 
 
 def test_better_fit_after_reevaluation_is_provisional_self_correction(question):
-    choices = {"B": "Hypothesis testing cannot be performed", "D": "Participants act as their own controls"}
+    choices = {
+        "B": "Hypothesis testing cannot be performed",
+        "D": "Participants act as their own controls",
+    }
     raw = """1. Facts\nDescriptive case series.\n2. Implications\nNo controlled hypothesis test.\n3. Provisional answer\nThe provisional answer is D. Participants act as their own controls. However, reevaluating for a better fit: A better fit seems to be B. Hypothesis testing cannot be performed.\n4. Best alternative\nD. Participants act as their own controls is less suitable.\n5. Decisive distinction\nNo control group.\n6. What would change the answer\nA before-after intervention could favor D.\n7. Reconsideration\nRetain B.\n8. Final answer\nB. Hypothesis testing cannot be performed\n"""
     recovered = recover_protocol(raw, choices)
     assert recovered.semantic_provisional_option == "B"
@@ -1673,7 +1750,11 @@ def test_better_fit_after_reevaluation_is_provisional_self_correction(question):
 
 
 def test_expected_feature_language_can_support_provisional_choice_without_letter(question):
-    choices = {"A": "Seizures due to hypocalcemia", "B": "Catlike cry", "C": "Hyperthyroidism from transplacental antibodies"}
+    choices = {
+        "A": "Seizures due to hypocalcemia",
+        "B": "Catlike cry",
+        "C": "Hyperthyroidism from transplacental antibodies",
+    }
     raw = """1. Facts\nDiGeorge syndrome.\n2. Implications\nParathyroid dysfunction causes hypocalcemia.\n3. Provisional answer\nThe expected additional feature would be related to parathyroid dysfunction. Hypocalcemia can cause seizures.\n4. Best alternative\nB. Catlike cry is less suitable.\n5. Decisive distinction\nHypocalcemia is characteristic.\n6. What would change the answer\nA different syndrome would favor B.\n7. Reconsideration\nThe original facts still support the initial conclusion.\n8. Final answer\nA. Seizures due to hypocalcemia\n"""
     recovered = recover_protocol(raw, choices)
     assert recovered.semantic_provisional_option == "A"
@@ -1688,7 +1769,12 @@ def test_leading_option_word_label_is_authoritative_for_provisional_role(questio
 
 
 def test_provisional_natural_conclusion_most_directly_related_maps_choice_text(question):
-    choices = {"A": "Pancreatic adenocarcinoma", "B": "Esophageal varices", "C": "Porcelain gallbladder", "D": "Hepatic steatosis"}
+    choices = {
+        "A": "Pancreatic adenocarcinoma",
+        "B": "Esophageal varices",
+        "C": "Porcelain gallbladder",
+        "D": "Hepatic steatosis",
+    }
     raw = """1. Facts\nSmoking history.\n2. Implications\nSeveral conditions are possible.\n3. Provisional answer\nThe options have been considered. Given the information, the most directly related condition to the smoking history is pancreatic adenocarcinoma.\n4. Best alternative\nD. Hepatic steatosis is the best alternative.\n5. Decisive distinction\nSmoking is the stronger direct association for A.\n6. What would change the answer\nHeavy alcohol use with liver disease would make D win.\n7. Reconsideration\nRetain A.\n8. Final answer\nA. Pancreatic adenocarcinoma\n"""
     recovered = recover_protocol(raw, choices)
     assert recovered.semantic_provisional_option == "A"
@@ -1733,7 +1819,10 @@ def test_reconsideration_positive_choice_sentence_not_vetoed_by_later_negative_c
 
 
 def test_compact_role_label_b_why_is_a_selection(question):
-    choices = {"B": "Hypothesis testing cannot be performed", "D": "Participants act as their own controls"}
+    choices = {
+        "B": "Hypothesis testing cannot be performed",
+        "D": "Participants act as their own controls",
+    }
     raw = """1. Facts\nCase series.\n2. Implications\nNo control group.\n3. Provisional answer\nB Why? The study is descriptive and cannot test hypotheses.\n4. Best alternative\nD Why it is less suitable? No within-subject comparison is described.\n5. Decisive distinction\nNo comparison group.\n6. What would change the answer\nA before-after design would make D win.\n7. Reconsideration\nRetain B.\n8. Final answer\nB. Hypothesis testing cannot be performed\n"""
     recovered = recover_protocol(raw, choices)
     assert recovered.semantic_provisional_option == "B"
@@ -1834,7 +1923,6 @@ def test_second_best_different_answer_that_could_be_considered_is_choice(questio
     assert recovered.semantic_decision == "retain"
 
 
-
 def test_counterfactual_might_make_declared_alternative_more_suitable(question, lexical_reference):
     choices = {"A": "Sudden sensorineural hearing loss", "B": "Alternative regimen"}
     raw = """1. Facts
@@ -1855,9 +1943,15 @@ Option A makes it highly suitable for the current acute pattern.
 A. Sudden sensorineural hearing loss
 """
     custom = type(question)(
-        id=question.id, dataset=question.dataset, stem=question.stem, choices=choices,
-        gold="A", gold_text=choices["A"], gold_source=question.gold_source,
-        gold_raw="A", source_split=question.source_split,
+        id=question.id,
+        dataset=question.dataset,
+        stem=question.stem,
+        choices=choices,
+        gold="A",
+        gold_text=choices["A"],
+        gold_source=question.gold_source,
+        gold_raw="A",
+        source_split=question.source_split,
     )
     result = judge(custom, "completed", raw, "system", lexical_reference)
     assert result["answer_change_discussed"] == 1.0
@@ -1874,7 +1968,9 @@ def test_early_commitment_rejects_hedged_differential_diagnosis(question):
 
 
 def test_early_commitment_rejects_question_restatement(question):
-    text = "Key question: What is the most appropriate next step? We should compare the options first."
+    text = (
+        "Key question: What is the most appropriate next step? We should compare the options first."
+    )
     assert _commitments(text, question.choices) == []
 
 

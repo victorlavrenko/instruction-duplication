@@ -136,9 +136,7 @@ def test_transport_compatible_workspace_can_resume_after_measurement_version_cha
     ws.require_prepared()
 
 
-def test_305_does_not_claim_generation_compatibility_with_303(
-    tmp_path: Path, local_jsonl: Path
-):
+def test_305_does_not_claim_generation_compatibility_with_303(tmp_path: Path, local_jsonl: Path):
     root = tmp_path / "run"
     prepare(root, local_jsonl)
     ws = Workspace(root)

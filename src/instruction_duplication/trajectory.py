@@ -183,7 +183,6 @@ SEMANTIC_DECISION_RE = re.compile(
 )
 
 
-
 @dataclass(frozen=True, slots=True)
 class RecoveredProtocol:
     """Locally recovered protocol content, independent of serialization syntax."""
@@ -285,7 +284,9 @@ def _option(match: re.Match[str] | None, choices: Mapping[str, str]) -> str | No
     return option if option in choices else None
 
 
-def _normalized_choice_tokens(label: str, choice: str, choices: Mapping[str, str]) -> tuple[str, ...]:
+def _normalized_choice_tokens(
+    label: str, choice: str, choices: Mapping[str, str]
+) -> tuple[str, ...]:
     """Normalize benchmark choice text for semantic matching, including known export debris."""
     cleaned = _plain_text(choice)
     terminal = re.search(r"\s*\(([A-Z])\)\s*$", cleaned)
@@ -295,11 +296,11 @@ def _normalized_choice_tokens(label: str, choice: str, choices: Mapping[str, str
     # Some MedQA exports in this corpus contain a literal terminal ``rn`` where a
     # line break was intended (e.g. ``Fludarabinern`` / ``Vincristinern``). Only
     # activate that repair when it is visibly a question-level encoding pattern.
-    rn_artifact = sum(
-        normalize_text(value).endswith("rn") for value in choices.values()
-    ) >= 2
+    rn_artifact = sum(normalize_text(value).endswith("rn") for value in choices.values()) >= 2
     if rn_artifact:
-        tokens = [token[:-2] if len(token) > 4 and token.endswith("rn") else token for token in tokens]
+        tokens = [
+            token[:-2] if len(token) > 4 and token.endswith("rn") else token for token in tokens
+        ]
     return tuple(token for token in tokens if token)
 
 
@@ -351,7 +352,9 @@ def _choice_from_fragment(fragment: str, choices: Mapping[str, str]) -> str | No
     fragment_tokens = {_light_stem(token) for token in normalized_fragment.split()}
     scored: list[tuple[float, int, str]] = []
     for label, choice in choices.items():
-        choice_tokens = {_light_stem(token) for token in _normalized_choice_tokens(label, choice, choices)}
+        choice_tokens = {
+            _light_stem(token) for token in _normalized_choice_tokens(label, choice, choices)
+        }
         if not choice_tokens or choice_tokens <= {"n", "a"}:
             continue
         overlap = len(choice_tokens & fragment_tokens) / len(choice_tokens)
@@ -389,8 +392,28 @@ def _choice_from_salient_text(text: str, choices: Mapping[str, str]) -> str | No
     for label, choice in choices.items():
         tokens = {_light_stem(token) for token in _normalized_choice_tokens(label, choice, choices)}
         tokens = {
-            token for token in tokens
-            if token not in {"a", "an", "the", "of", "and", "or", "with", "for", "to", "in", "on", "is", "are", "cell", "answer", "choice", "option"}
+            token
+            for token in tokens
+            if token
+            not in {
+                "a",
+                "an",
+                "the",
+                "of",
+                "and",
+                "or",
+                "with",
+                "for",
+                "to",
+                "in",
+                "on",
+                "is",
+                "are",
+                "cell",
+                "answer",
+                "choice",
+                "option",
+            }
             and (len(token) >= 3 or any(ch.isdigit() for ch in token))
         }
         per_choice[label] = tokens
@@ -447,7 +470,9 @@ def _choice_from_selected_clause(
             re.IGNORECASE,
         )
     elif role == "final_answer":
-        cue = re.compile(r"\b(?:final\s+answer|final\s+choice|therefore|thus|conclusion)\b", re.IGNORECASE)
+        cue = re.compile(
+            r"\b(?:final\s+answer|final\s+choice|therefore|thus|conclusion)\b", re.IGNORECASE
+        )
     else:
         cue = re.compile(
             r"\b(?:provisional\s+answer|initial\s+answer|best\s+answer|best\s+choice|"
@@ -517,7 +542,10 @@ def _semantic_option(
             )
             if unpunctuated is not None:
                 candidate = unpunctuated.group(1).upper()
-                if candidate in choices and _choice_from_fragment(visible[:240], choices) == candidate:
+                if (
+                    candidate in choices
+                    and _choice_from_fragment(visible[:240], choices) == candidate
+                ):
                     leading_role_option = candidate
         if leading_role_option is None:
             compact_role_label = re.match(
@@ -620,7 +648,7 @@ def _semantic_option(
         selectors = (
             r"(?:(?:provisional|initial)\s+(?:answer|choice|diagnosis|treatment)|"
             r"(?:best|correct|selected|preferred|most\s+likely|most\s+appropriate|least\s+likely|least\s+appropriate|most\s+reasonable)\s+"
-            r"(?:[a-z][a-z'’-]*\s+){0,10}(?:answer|choice|option|diagnosis|treatment|management|"
+            r"(?:[a-z][a-z'\N{RIGHT SINGLE QUOTATION MARK}-]*\s+){0,10}(?:answer|choice|option|diagnosis|treatment|management|"
             r"cause|explanation|phase|approach|position|step)?)"
         )
 
@@ -720,17 +748,18 @@ def _semantic_option(
         # When a bare option letter is not punctuated (``B seems universally
         # applicable``), scan only actual choice labels.  A generic ``[A-Z]`` regex
         # can otherwise capture the capital G in ``Given this`` and skip the real B.
-        for option in choices:
-            option_re = re.escape(option)
+        contextual.extend(
+            (match.start(), option)
+            for option in choices
             for match in re.finditer(
-                rf"(?<![A-Za-z]){option_re}(?![A-Za-z])[^.;\n]{{0,80}}?"
+                rf"(?<![A-Za-z]){re.escape(option)}(?![A-Za-z])[^.;\n]{{0,80}}?"
                 r"(?:seems|appears|is)\s+(?:to\s+be\s+)?(?:(?:the|a|an)\s+)?"
                 r"(?:universally\s+applicable|best|better|preferred|most\s+appropriate)|"
-                rf"(?<![A-Za-z]){option_re}(?![A-Za-z])[^.;\n]{{0,100}}?directly\s+(?:answers?|addresses?|fits?)",
+                rf"(?<![A-Za-z]){re.escape(option)}(?![A-Za-z])[^.;\n]{{0,100}}?directly\s+(?:answers?|addresses?|fits?)",
                 visible,
                 re.IGNORECASE,
-            ):
-                contextual.append((match.start(), option))
+            )
+        )
 
         role_after_label = re.compile(
             r"(?<![A-Za-z])(?-i:([A-Z]))[.):]\s*[^.;\n]{0,150}?"
@@ -962,7 +991,11 @@ def _semantic_option(
         )
     elif role == "second_best":
         salient_allowed = bool(
-            re.search(r"\b(?:best\s+alternative|second[- ]best|runner[- ]?up|alternative\s+(?:answer|choice|diagnosis|treatment)|is\s+the\s+alternative)\b", visible, re.IGNORECASE)
+            re.search(
+                r"\b(?:best\s+alternative|second[- ]best|runner[- ]?up|alternative\s+(?:answer|choice|diagnosis|treatment)|is\s+the\s+alternative)\b",
+                visible,
+                re.IGNORECASE,
+            )
         )
     else:
         salient_allowed = True
@@ -1164,7 +1197,6 @@ def _reconsideration_selected_option(
     return max(candidates, default=(0, None), key=lambda item: item[0])[1]
 
 
-
 def _reconsideration_supports_option(
     text: str,
     choices: Mapping[str, str],
@@ -1254,8 +1286,7 @@ def _reconsideration_supports_option(
             has_choice = hits >= min(3, len(choice_tokens))
         if not has_choice and distinctive_tokens:
             has_choice = any(
-                re.search(rf"\b{re.escape(token)}\b", chunk)
-                for token in distinctive_tokens
+                re.search(rf"\b{re.escape(token)}\b", chunk) for token in distinctive_tokens
             )
         if not (has_label or has_choice):
             continue
@@ -1263,7 +1294,7 @@ def _reconsideration_supports_option(
             continue
         # A negation only vetoes when it occurs close to the target reference; this
         # avoids rejecting ``other options are not appropriate; B is best``.
-        ref_positions = []
+        ref_positions: list[int] = []
         for pattern in label_refs:
             ref_positions.extend(m.start() for m in pattern.finditer(chunk))
         if has_choice and choice_norm:
@@ -1276,6 +1307,7 @@ def _reconsideration_supports_option(
         if not veto:
             return True
     return False
+
 
 def _semantic_decision(
     text: str,
@@ -1389,7 +1421,7 @@ def _semantic_decision(
 
     # If the actual provisional option/choice is explicitly named, accept the same
     # retain predicates even when the author omits the words ``provisional answer``.
-    if choices is not None and provisional_option in choices:
+    if choices is not None and provisional_option is not None and provisional_option in choices:
         raw_label = re.escape(provisional_option.upper())
         # At a sentence/list boundary an uppercase bare label followed immediately
         # by a retain predicate is unambiguous enough to accept (``A remains the
@@ -1407,9 +1439,7 @@ def _semantic_decision(
         choice = " ".join(choices[provisional_option].casefold().split())
         # In case-folded text a bare option A/I is indistinguishable from ordinary
         # words. Require option punctuation/parentheses, or use the full answer text.
-        subjects = [
-            rf"(?:(?:option|choice)\s+{label}\b|\({label}\)|\b{label}[.)])"
-        ]
+        subjects = [rf"(?:(?:option|choice)\s+{label}\b|\({label}\)|\b{label}[.)])"]
         if choice:
             subjects.append(re.escape(choice))
         for subject in subjects:
@@ -1426,12 +1456,17 @@ def _semantic_decision(
             ):
                 return "retain"
 
-
     # A direct option-labelled evaluative relation is also a genuine conclusion.
     # Keep this on raw visible text: normalize_text intentionally strips leading
     # option labels, which would otherwise erase the subject in forms such as
     # ``Option J makes it highly suitable``.
-    if choices is not None and provisional_option in choices and final_option in choices:
+    if (
+        choices is not None
+        and provisional_option is not None
+        and provisional_option in choices
+        and final_option is not None
+        and final_option in choices
+    ):
         for target in (final_option, provisional_option):
             target_label = re.escape(target.upper())
             if re.search(
@@ -1446,27 +1481,45 @@ def _semantic_decision(
     # If the section itself clearly concludes on an option, infer retain/revise by
     # comparing that concluded option with the recovered provisional answer. The
     # judge separately verifies consistency with the final answer.
-    if choices is not None and provisional_option in choices:
+    if choices is not None and provisional_option is not None and provisional_option in choices:
         concluded = _reconsideration_selected_option(text, choices)
         if concluded == provisional_option:
             return "retain"
-        if concluded in choices and final_option in choices and concluded == final_option:
+        if (
+            concluded in choices
+            and final_option is not None
+            and final_option in choices
+            and concluded == final_option
+        ):
             return "revise"
-        if final_option in choices and _reconsideration_supports_option(text, choices, final_option):
+        if (
+            final_option is not None
+            and final_option in choices
+            and _reconsideration_supports_option(text, choices, final_option)
+        ):
             return "retain" if final_option == provisional_option else "revise"
-        if final_option in choices and final_option == provisional_option and re.search(
-            r"\b(?:provisional\s+answer\s+(?:is\s+)?confirmed|"
-            r"(?:therefore|thus)[^.;\n]{0,60}provisional\s+answer\s+(?:is\s+)?confirmed|"
-            r"(?:remains?|is\s+still|still\s+(?:seems|appears))\s+(?:the\s+)?"
-            r"(?:best|correct|most\s+likely|most\s+appropriate|most\s+accurate)\s+"
-            r"(?:answer|choice|diagnosis|treatment|explanation))\b",
-            normalized,
+        if (
+            final_option is not None
+            and final_option in choices
+            and final_option == provisional_option
+            and re.search(
+                r"\b(?:provisional\s+answer\s+(?:is\s+)?confirmed|"
+                r"(?:therefore|thus)[^.;\n]{0,60}provisional\s+answer\s+(?:is\s+)?confirmed|"
+                r"(?:remains?|is\s+still|still\s+(?:seems|appears))\s+(?:the\s+)?"
+                r"(?:best|correct|most\s+likely|most\s+appropriate|most\s+accurate)\s+"
+                r"(?:answer|choice|diagnosis|treatment|explanation))\b",
+                normalized,
+            )
         ):
             return "retain"
 
     if (
-        provisional_option in choices if choices is not None else False
-    ) and final_option in choices:
+        choices is not None
+        and provisional_option is not None
+        and provisional_option in choices
+        and final_option is not None
+        and final_option in choices
+    ):
         token_count = len(normalize_text(text).split())
         continuity = re.search(
             r"\b(?:upon\s+reconsideration|after\s+reconsideration|reconsidering|re-evaluating|"
@@ -1517,11 +1570,8 @@ def _semantic_decision(
                 "change",
                 "switch",
                 "maintain",
-                "retained",
                 "kept",
-                "maintained",
                 "unchanged",
-                "revised",
                 "changed",
                 "switched",
                 "remains",
@@ -1532,20 +1582,38 @@ def _semantic_decision(
                 "still most likely",
                 "switching",
                 "changing",
-                "revising",
             }
         ),
         None,
     )
     if action in {
-        "retain", "retaining", "keep", "maintain", "maintaining", "retained", "kept", "maintained",
-        "unchanged", "remains", "remain", "stands", "still best",
-        "still correct", "still most likely",
+        "retain",
+        "retaining",
+        "keep",
+        "maintain",
+        "maintaining",
+        "retained",
+        "kept",
+        "maintained",
+        "unchanged",
+        "remains",
+        "remain",
+        "stands",
+        "still best",
+        "still correct",
+        "still most likely",
     }:
         return "retain"
     if action in {
-        "revise", "revising", "change", "switch", "revised", "changed", "switched",
-        "switching", "changing",
+        "revise",
+        "revising",
+        "change",
+        "switch",
+        "revised",
+        "changed",
+        "switched",
+        "switching",
+        "changing",
     }:
         return "revise"
     return None
@@ -1589,10 +1657,7 @@ def _semantic_matches(
             headings = tuple(
                 match
                 for _, match in sorted(
-                    {
-                        (match.start(), match.end()): match
-                        for match in all_headings
-                    }.items()
+                    {(match.start(), match.end()): match for match in all_headings}.items()
                 )
             )
         combined = sorted((*exact[tag], *headings), key=lambda match: match.start())
@@ -1609,7 +1674,6 @@ def _semantic_matches(
         closings = tuple(CLOSING_TAG_PATTERNS[tag].finditer(document))
         recovered[tag] = closings[:1]
     return recovered
-
 
 
 def _local_semantic_body(
@@ -1655,9 +1719,8 @@ def _candidate_sequence_score(
     if tag in {"provisional_answer", "second_best", "final_answer"}:
         if _semantic_option(body, choices, tag) is not None:
             score += 12.0
-    elif tag == "rereasoning":
-        if _semantic_decision(body, choices) in VALID_DECISIONS:
-            score += 12.0
+    elif tag == "rereasoning" and _semantic_decision(body, choices) in VALID_DECISIONS:
+        score += 12.0
     if document:
         score += (match.start() / len(document)) * 0.001
     return score
@@ -1689,16 +1752,15 @@ def _coherent_semantic_sequence(
     # score ending at a concrete marker plus the chosen prefix.  Candidate counts
     # are tiny in practice, but this remains O(sum n_i*n_{i-1}) rather than
     # enumerating the Cartesian product of repeated templates.
-    states: list[tuple[re.Match[str], float, tuple[re.Match[str], ...]]] = []
     first_tag = CONTENT_TAGS[0]
-    for match in semantic_matches[first_tag]:
-        states.append(
-            (
-                match,
-                _candidate_sequence_score(document, semantic_matches, first_tag, match, choices),
-                (match,),
-            )
+    states: list[tuple[re.Match[str], float, tuple[re.Match[str], ...]]] = [
+        (
+            match,
+            _candidate_sequence_score(document, semantic_matches, first_tag, match, choices),
+            (match,),
         )
+        for match in semantic_matches[first_tag]
+    ]
 
     for tag in CONTENT_TAGS[1:]:
         next_states: list[tuple[re.Match[str], float, tuple[re.Match[str], ...]]] = []
@@ -1725,7 +1787,7 @@ def _coherent_semantic_sequence(
 
 def _selected_segment_end(
     document: str,
-    selected: Mapping[str, re.Match[str]],
+    selected: Mapping[str, re.Match[str] | None],
     semantic_matches: Mapping[str, tuple[re.Match[str], ...]],
     tag: str,
     start: re.Match[str],
@@ -1746,7 +1808,11 @@ def _selected_segment_end(
     This preserves protection against weak body-internal role phrases while making
     genuine numbered/Markdown/XML duplicate templates segment correctly.
     """
-    later = [match.start() for match in selected.values() if match.start() > start.start()]
+    later = [
+        match.start()
+        for match in selected.values()
+        if match is not None and match.start() > start.start()
+    ]
     end = min(later) if later else len(document)
 
     try:
@@ -1846,12 +1912,8 @@ def recover_protocol(raw: str, choices: Mapping[str, str]) -> RecoveredProtocol:
     semantic_provisional = provisional or _semantic_option(
         recovered["provisional_answer"], choices, "provisional_answer"
     )
-    semantic_second = second or _semantic_option(
-        recovered["second_best"], choices, "second_best"
-    )
-    semantic_final = final or _semantic_option(
-        recovered["final_answer"], choices, "final_answer"
-    )
+    semantic_second = second or _semantic_option(recovered["second_best"], choices, "second_best")
+    semantic_final = final or _semantic_option(recovered["final_answer"], choices, "final_answer")
     semantic_decision = decision or _semantic_decision(
         recovered["rereasoning"], choices, semantic_provisional, semantic_final
     )

@@ -698,7 +698,16 @@ def _interrogative_prompt_context(text: str, start: int, end: int) -> bool:
     clause-locally so a genuine answer in the following sentence is unaffected.
     """
     left = max(text.rfind("\n", 0, start), text.rfind(".", 0, start), text.rfind(";", 0, start)) + 1
-    stops = [pos for pos in (text.find("\n", end), text.find(".", end), text.find(";", end), text.find("?", end)) if pos >= 0]
+    stops = [
+        pos
+        for pos in (
+            text.find("\n", end),
+            text.find(".", end),
+            text.find(";", end),
+            text.find("?", end),
+        )
+        if pos >= 0
+    ]
     right = min(stops) + 1 if stops else min(len(text), end + 220)
     clause = text[left:right]
     folded = clause.casefold().strip()
@@ -716,14 +725,16 @@ def _hedged_choice_continuation(candidate: str, choice: str) -> bool:
     """
     if not candidate.startswith(choice):
         return False
-    remainder = candidate[len(choice):].strip()
-    return bool(re.match(
-        r"^(?:is\s+)?(?:possible|plausible|a\s+possibility|a\s+consideration|less\s+likely|unlikely)\b|"
-        r"^(?:could|may|might|can)\s+(?:be\s+)?(?:possible|plausible|considered|the\s+cause|a\s+cause)?\b|"
-        r"^should\s+be\s+considered\b|^cannot\s+be\s+excluded\b",
-        remainder,
-        re.IGNORECASE,
-    ))
+    remainder = candidate[len(choice) :].strip()
+    return bool(
+        re.match(
+            r"^(?:is\s+)?(?:possible|plausible|a\s+possibility|a\s+consideration|less\s+likely|unlikely)\b|"
+            r"^(?:could|may|might|can)\s+(?:be\s+)?(?:possible|plausible|considered|the\s+cause|a\s+cause)?\b|"
+            r"^should\s+be\s+considered\b|^cannot\s+be\s+excluded\b",
+            remainder,
+            re.IGNORECASE,
+        )
+    )
 
 
 def _choice_text_commitments(
@@ -824,16 +835,17 @@ def _commitments(text: str, choices: Mapping[str, str]) -> list[CommitmentEvent]
                 continue
             if _interrogative_prompt_context(text, match.start(), match.end()):
                 continue
-            evidence_prefix = normalize_text(match.group(0)[: max(0, match.group(0).find(match.group(1)))])
+            evidence_prefix = normalize_text(
+                match.group(0)[: max(0, match.group(0).find(match.group(1)))]
+            )
             nearby_prefix = text[max(0, match.start() - 220) : match.start()]
-            if (
-                re.fullmatch(r"(?:diagnosis|treatment|management|cause)", evidence_prefix)
-                and re.search(
-                    r"\b(?:differential(?:\s+diagnosis)?|answer\s+choices?|choices?\s+(?:include|represent)|"
-                    r"options?\s+(?:include|listed|above)|treatment\s+options?|alternative(?:s|\s+diagnoses)?)\b",
-                    nearby_prefix,
-                    re.IGNORECASE,
-                )
+            if re.fullmatch(
+                r"(?:diagnosis|treatment|management|cause)", evidence_prefix
+            ) and re.search(
+                r"\b(?:differential(?:\s+diagnosis)?|answer\s+choices?|choices?\s+(?:include|represent)|"
+                r"options?\s+(?:include|listed|above)|treatment\s+options?|alternative(?:s|\s+diagnoses)?)\b",
+                nearby_prefix,
+                re.IGNORECASE,
             ):
                 continue
             candidate = normalize_text(match.group(1))
@@ -1091,7 +1103,9 @@ def _explicit_counterfactual_winners(
                 break
             # Natural constructions often put the modal before the choice name:
             # ``would make striae albicantes the best answer``.
-            if re.search(r"\b(?:would|could|might)\s+(?:then\s+)?make\b[^.;\n]{0,45}$", before, re.IGNORECASE) and re.match(
+            if re.search(
+                r"\b(?:would|could|might)\s+(?:then\s+)?make\b[^.;\n]{0,45}$", before, re.IGNORECASE
+            ) and re.match(
                 r"[^.;\n]{0,45}\b(?:the\s+)?(?:best|correct|most\s+likely|more\s+likely|most\s+appropriate|more\s+appropriate|preferred|better)\b",
                 after,
                 re.IGNORECASE,
@@ -1133,7 +1147,7 @@ def _normalized_choice_aliases(choice: str) -> tuple[str, ...]:
     ``father``.  We do not invent abbreviations or semantic synonyms here.
     """
     normalized = normalize_text(choice).casefold().strip()
-    aliases = {normalized} if normalized else set()
+    aliases: set[str] = {normalized} if normalized else set()
     tokens = normalized.split()
     while tokens and tokens[0] in {"the", "a", "an", "his", "her", "their"}:
         tokens = tokens[1:]
@@ -1208,7 +1222,12 @@ def _scenario_has_ambiguous_joint_winner(
     """
     for match in COUNTERFACTUAL_AMBIGUOUS_OR_RE.finditer(scenario):
         left, right = (group.upper() for group in match.groups())
-        if left in choices and right in choices and left != right and second_best_option in {left, right}:
+        if (
+            left in choices
+            and right in choices
+            and left != right
+            and second_best_option in {left, right}
+        ):
             return True
     return False
 
@@ -1598,7 +1617,6 @@ def _preanswer_facts_discussed(
     return bool(_informative(text, 4) and score_anchor_recall(question.stem, text) > 0)
 
 
-
 DECISIVE_CONTRAST_CUES = re.compile(
     r"\b(?:versus|vs\.?|rather\s+than|whereas|while|unlike|compared\s+(?:with|to)|"
     r"distinguish(?:es|ed|ing)?|distinction|difference|differ(?:s|ed|ent)?|"
@@ -1953,9 +1971,7 @@ def _instructed_judgment(
     # deliberately simpler Step-6 observable: non-trivial generated content.
     # The strict semantic Step-6 result remains exported as exploratory.
     validated_substantive = dict(substantive)
-    validated_substantive["answer_changing_change"] = bool(
-        nontrivial["answer_changing_change"]
-    )
+    validated_substantive["answer_changing_change"] = bool(nontrivial["answer_changing_change"])
     validated_role_count = sum(bool(value) for value in validated_substantive.values())
     validated_role_completeness_score = validated_role_count / len(CONTENT_TAGS)
     all_roles_validated_complete = bool(all(validated_substantive.values()))
@@ -2042,7 +2058,9 @@ def _instructed_judgment(
         substantive["rereasoning"],
     )
     contrastive_discussion_count = sum(bool(value) for value in contrastive_discussion_components)
-    contrastive_discussion_score = contrastive_discussion_count / len(contrastive_discussion_components)
+    contrastive_discussion_score = contrastive_discussion_count / len(
+        contrastive_discussion_components
+    )
     validated_contrastive_discussion_components = (
         validated_substantive["provisional_answer"],
         validated_substantive["second_best"],
@@ -2053,8 +2071,8 @@ def _instructed_judgment(
     validated_contrastive_discussion_count = sum(
         bool(value) for value in validated_contrastive_discussion_components
     )
-    validated_contrastive_discussion_score = (
-        validated_contrastive_discussion_count / len(validated_contrastive_discussion_components)
+    validated_contrastive_discussion_score = validated_contrastive_discussion_count / len(
+        validated_contrastive_discussion_components
     )
     role_completeness_score = section_substantive_fraction
     all_roles_substantive = bool(all(substantive.values()))
@@ -2132,7 +2150,9 @@ def _instructed_judgment(
         "role_best_alternative_complete": float(substantive["second_best"]),
         "role_decisive_distinction_complete": float(substantive["decisive_fact"]),
         "role_answer_changing_change_complete": float(substantive["answer_changing_change"]),
-        "role_answer_changing_change_nontrivial": float(validated_substantive["answer_changing_change"]),
+        "role_answer_changing_change_nontrivial": float(
+            validated_substantive["answer_changing_change"]
+        ),
         "role_reconsideration_complete": float(substantive["rereasoning"]),
         "role_final_answer_complete": float(substantive["final_answer"]),
         "trajectory_criteria": {

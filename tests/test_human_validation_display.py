@@ -18,8 +18,8 @@ def test_lexical_display_never_highlights_stopwords_and_marks_common_context() -
         reference,
     )
     assert '<mark class="lex"' in rendered
-    assert '>sacral</mark>' in rendered
+    assert ">sacral</mark>" in rendered
     assert '<span class="lex-common"' in rendered
-    assert '>sulcus</span>' in rendered
-    assert '>not</mark>' not in rendered
-    assert '>not</span>' not in rendered
+    assert ">sulcus</span>" in rendered
+    assert ">not</mark>" not in rendered
+    assert ">not</span>" not in rendered

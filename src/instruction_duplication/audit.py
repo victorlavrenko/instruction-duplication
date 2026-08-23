@@ -17,15 +17,15 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
 from .io_utils import read_json, sha256_json, write_json, write_jsonl
-from .json_types import JsonObject, json_object, object_value
+from .json_types import JsonObject, is_string_mapping, json_object, object_value
 from .lexical import (
     TFIDF_STOPWORDS,
     LexicalReference,
-    _candidate_counts,
-    _validated_abbreviations,
+    candidate_counts,
     compile_reference,
     measurement_stem,
     tfidf_tokens,
+    validated_abbreviations,
 )
 from .models import Model
 from .trajectory import recover_protocol
@@ -225,7 +225,7 @@ def _pair_hash(*parts: str) -> str:
 
 def _judgment(row: Mapping[str, object]) -> Mapping[str, object]:
     value = row.get("judgment")
-    return value if isinstance(value, Mapping) else {}
+    return value if is_string_mapping(value) else {}
 
 
 def _number(value: object) -> float | None:
@@ -259,11 +259,10 @@ def _excerpt(row: Mapping[str, object], section_names: Sequence[str]) -> str:
     return "\n\n".join(parts)
 
 
-
-
 def _excerpt_normalized(row: Mapping[str, object], section_names: Sequence[str]) -> str:
     """Return a normalized excerpt string for automatic same-task detection."""
     return " ".join(_excerpt(row, section_names).split())
+
 
 def _lexical_sections(row: Mapping[str, object]) -> tuple[str, str]:
     sections = _sections(row)
@@ -288,9 +287,9 @@ def _preanswer_candidate_counts(stem: str, facts: str, implications: str) -> Cou
     """Return the exact TF-IDF-visible term counts for Facts+Implications."""
     source = measurement_stem(stem)
     stem_tokens = tfidf_tokens(source)
-    abbreviations = _validated_abbreviations(source)
-    facts_counts, _ = _candidate_counts(facts, stem_tokens, abbreviations)
-    implications_counts, _ = _candidate_counts(implications, stem_tokens, abbreviations)
+    abbreviations = validated_abbreviations(source)
+    facts_counts, _ = candidate_counts(facts, stem_tokens, abbreviations)
+    implications_counts, _ = candidate_counts(implications, stem_tokens, abbreviations)
     return facts_counts + implications_counts
 
 
@@ -306,14 +305,23 @@ def _asymmetric_coverage_counts(left: Counter[str], right: Counter[str]) -> Coun
 
 def _common_coverage_counts(left: Counter[str], right: Counter[str]) -> Counter[str]:
     """Return source-term counts credited on both sides."""
-    return Counter({term: min(count, right.get(term, 0)) for term, count in left.items() if min(count, right.get(term, 0)) > 0})
+    return Counter(
+        {
+            term: min(count, right.get(term, 0))
+            for term, count in left.items()
+            if min(count, right.get(term, 0)) > 0
+        }
+    )
 
 
 def _has_lexical_difference(stem: str, first: tuple[str, str], second: tuple[str, str]) -> bool:
     """Return True only when the two sides visibly differ in recovered stem terms."""
     a_counts = _preanswer_candidate_counts(stem, first[0], first[1])
     b_counts = _preanswer_candidate_counts(stem, second[0], second[1])
-    return bool(_asymmetric_coverage_counts(a_counts, b_counts) or _asymmetric_coverage_counts(b_counts, a_counts))
+    return bool(
+        _asymmetric_coverage_counts(a_counts, b_counts)
+        or _asymmetric_coverage_counts(b_counts, a_counts)
+    )
 
 
 def _highlight_stem_coverage(
@@ -346,17 +354,15 @@ def _highlight_stem_coverage(
         canonical = () if surface_folded in DISPLAY_STOPWORDS else tfidf_tokens(surface)
         term = canonical[0] if len(canonical) == 1 else None
 
-        common = term is not None and common_counts.get(term, 0) > used_common.get(term, 0)
-        if common:
+        if term is not None and common_counts.get(term, 0) > used_common.get(term, 0):
             used_common[term] += 1
             pieces.append(
                 '<span class="lex-common" title="Preserved on both sides">'
                 + html.escape(surface)
-                + '</span>'
+                + "</span>"
             )
         else:
-            unique = term is not None and unique_counts.get(term, 0) > used_unique.get(term, 0)
-            if unique:
+            if term is not None and unique_counts.get(term, 0) > used_unique.get(term, 0):
                 used_unique[term] += 1
                 idf = _idf(term, reference)
                 strength = (idf - 1.0) / denominator
@@ -365,13 +371,13 @@ def _highlight_stem_coverage(
                     f'<mark class="lex" style="--mark-alpha:{opacity:.3f}" '
                     f'title="Preserved here but not on the other side · PubMed IDF {idf:.2f}">'
                     + html.escape(surface)
-                    + '</mark>'
+                    + "</mark>"
                 )
             else:
                 pieces.append(html.escape(surface))
         cursor = match.end()
     pieces.append(html.escape(source[cursor:]))
-    return ''.join(pieces)
+    return "".join(pieces)
 
 
 def _base_candidates(rows: Iterable[JsonObject]) -> list[dict[str, object]]:
@@ -410,9 +416,8 @@ def _candidate_sort_key(candidate: Mapping[str, object], salt: str) -> str:
 
 
 def _lexical_eligible(candidate: Mapping[str, object]) -> bool:
-    control = candidate["control"]
-    treatment = candidate["treatment"]
-    assert isinstance(control, Mapping) and isinstance(treatment, Mapping)
+    control = object_value(candidate["control"], name="audit control row")
+    treatment = object_value(candidate["treatment"], name="audit treatment row")
     if not _content(control).strip() or not _content(treatment).strip():
         return False
     if (
@@ -425,14 +430,14 @@ def _lexical_eligible(candidate: Mapping[str, object]) -> bool:
 
 
 def _role_eligible(candidate: Mapping[str, object], field: str) -> bool:
-    control = candidate["control"]
-    treatment = candidate["treatment"]
-    assert isinstance(control, Mapping) and isinstance(treatment, Mapping)
+    control = object_value(candidate["control"], name="audit control row")
+    treatment = object_value(candidate["treatment"], name="audit treatment row")
     if not _content(control).strip() or not _content(treatment).strip():
         return False
-    return _number(_judgment(control).get(field)) is not None and _number(
-        _judgment(treatment).get(field)
-    ) is not None
+    return (
+        _number(_judgment(control).get(field)) is not None
+        and _number(_judgment(treatment).get(field)) is not None
+    )
 
 
 def _choose_one_per_question(
@@ -464,11 +469,14 @@ def _choose_one_per_question(
     return selected
 
 
-def _blind_order(candidate: Mapping[str, object], task_kind: str) -> tuple[Mapping[str, object], Mapping[str, object], str]:
-    treatment_first = int(_pair_hash(str(candidate["pair_id"]), task_kind, "order")[-1], 16) % 2 == 0
-    control = candidate["control"]
-    treatment = candidate["treatment"]
-    assert isinstance(control, Mapping) and isinstance(treatment, Mapping)
+def _blind_order(
+    candidate: Mapping[str, object], task_kind: str
+) -> tuple[Mapping[str, object], Mapping[str, object], str]:
+    treatment_first = (
+        int(_pair_hash(str(candidate["pair_id"]), task_kind, "order")[-1], 16) % 2 == 0
+    )
+    control = object_value(candidate["control"], name="audit control row")
+    treatment = object_value(candidate["treatment"], name="audit treatment row")
     if treatment_first:
         return treatment, control, "A"
     return control, treatment, "B"
@@ -535,12 +543,18 @@ def _lexical_task(
     return blind, key
 
 
-def _role_task(candidate: Mapping[str, object], spec: tuple[str, str, str, tuple[str, ...]]) -> tuple[JsonObject, JsonObject]:
+def _role_task(
+    candidate: Mapping[str, object], spec: tuple[str, str, str, tuple[str, ...]]
+) -> tuple[JsonObject, JsonObject]:
     role, field, title, context = spec
     first, second, treatment_response = _blind_order(candidate, f"role:{role}")
     excerpt_a = _excerpt(first, context)
     excerpt_b = _excerpt(second, context)
-    auto_rating = "same" if _excerpt_normalized(first, context) == _excerpt_normalized(second, context) else None
+    auto_rating = (
+        "same"
+        if _excerpt_normalized(first, context) == _excerpt_normalized(second, context)
+        else None
+    )
     task_id = _pair_hash(str(candidate["pair_id"]), f"role:{role}")[:20]
     blind = json_object(
         {
@@ -590,7 +604,9 @@ def _role_task(candidate: Mapping[str, object], spec: tuple[str, str, str, tuple
 
 
 def _render_rater(audit_rows: Sequence[JsonObject]) -> str:
-    payload = json.dumps(audit_rows, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
+    payload = json.dumps(audit_rows, ensure_ascii=False, separators=(",", ":")).replace(
+        "</", "<\\/"
+    )
     audit_identity = hashlib.sha256(payload.encode()).hexdigest()[:16]
     return f"""<!doctype html>
 <html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">
@@ -639,7 +655,6 @@ function render(){{const n=Object.keys(state.ratings).length;$('progress').textC
 function exportRatings(){{const rows=TASKS.map(t=>({{task_id:t.task_id,task_kind:t.task_kind,role:t.role||null,rating:state.ratings[t.task_id]||null}}));const out={{human_audit_version:{json.dumps(HUMAN_AUDIT_VERSION)},audit_id:AUDIT_ID,reviewer_id:state.reviewer_id||null,exported_at:new Date().toISOString(),complete:rows.every(r=>r.rating),ratings:rows}};const blob=new Blob([JSON.stringify(out,null,2)],{{type:'application/json'}});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='human-validation-ratings-'+AUDIT_ID+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}}
 $('exportTop').onclick=exportRatings;$('exportDone').onclick=exportRatings;document.addEventListener('keydown',e=>{{if(e.target.tagName==='INPUT')return;const t=TASKS[state.index];if(!t)return;if(e.key==='1')rate('A');if(e.key==='2')rate('B');if(e.key==='3')rate('same');if(e.key==='4')rate('cannot_tell')}});state.index=nextUnrated(0);save();render();
 </script></main></body></html>"""
-
 
 
 def _export_test_fixture_audit(
@@ -699,6 +714,7 @@ def _export_test_fixture_audit(
         path="fixture human audit metadata",
     )
 
+
 def export_blinded_matched_pairs(
     rows: Iterable[JsonObject],
     *,
@@ -720,8 +736,10 @@ def export_blinded_matched_pairs(
     # The repository has a one-pair synthetic unit test. Keep that fixture working,
     # but only for rows explicitly labeled as the test dataset; real workspaces remain
     # strict and must satisfy the complete frozen 199-task design.
-    if candidates and len(candidates) < expected and all(
-        str(candidate["dataset"]) == "test" for candidate in candidates
+    if (
+        candidates
+        and len(candidates) < expected
+        and all(str(candidate["dataset"]) == "test" for candidate in candidates)
     ):
         return _export_test_fixture_audit(
             candidates, audit_path=audit_path, key_path=key_path, schema_path=schema_path
@@ -787,7 +805,9 @@ def export_blinded_matched_pairs(
         for offset in range(len(ROLE_SPECS)):
             spec = ROLE_SPECS[(role_cursor + offset) % len(ROLE_SPECS)]
             role = spec[0]
-            if len(role_selected[role]) >= ROLE_TASK_COUNT or not _role_eligible(candidate, spec[1]):
+            if len(role_selected[role]) >= ROLE_TASK_COUNT or not _role_eligible(
+                candidate, spec[1]
+            ):
                 continue
             role_selected[role].append(candidate)
             role_cursor = (ROLE_SPECS.index(spec) + 1) % len(ROLE_SPECS)
@@ -829,7 +849,9 @@ def export_blinded_matched_pairs(
 
     # Deterministic mixed task order prevents long blocks of one role without making
     # task identity or A/B order predictable to the reviewer.
-    ordering = sorted(range(len(blind_rows)), key=lambda i: _pair_hash(str(blind_rows[i]["task_id"]), "display"))
+    ordering = sorted(
+        range(len(blind_rows)), key=lambda i: _pair_hash(str(blind_rows[i]["task_id"]), "display")
+    )
     blind_rows = [blind_rows[i] for i in ordering]
     key_by_id = {str(row["task_id"]): row for row in key_rows}
     key_rows = [key_by_id[str(row["task_id"])] for row in blind_rows]

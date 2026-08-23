@@ -531,9 +531,7 @@ async def test_probe_retains_complete_stop_when_reported_usage_exceeds_ceiling(q
 
 
 @pytest.mark.asyncio
-async def test_probe_rerun_uses_fresh_physical_and_provider_request_ids(
-    tmp_path: Path, question
-):
+async def test_probe_rerun_uses_fresh_physical_and_provider_request_ids(tmp_path: Path, question):
     model = MODEL_BY_ID["gemma-3-12b"]
     cell = probe_cell(question)
     raw = fake_response(cell)

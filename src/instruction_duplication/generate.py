@@ -90,7 +90,6 @@ class GenerationProgress:
 type GenerationProgressSink = Callable[[GenerationProgress], None]
 
 
-
 def utcnow() -> str:
     """Return one timezone-aware UTC timestamp."""
     return dt.datetime.now(dt.UTC).isoformat()
@@ -286,7 +285,6 @@ class ProviderCircuit:
             )
 
 
-
 @dataclass(slots=True)
 class RouteThrottle:
     """Adapt exact-route concurrency downward on transient provider failures."""
@@ -396,7 +394,6 @@ def _empty_circuits() -> dict[tuple[str, str], ProviderCircuit]:
 
 def _empty_route_throttles() -> dict[tuple[str, str, str], RouteThrottle]:
     return {}
-
 
 
 def _empty_clients() -> dict[tuple[str, str], httpx.AsyncClient]:

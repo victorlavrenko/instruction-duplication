@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from instruction_duplication.judge import _case_specific_counterfactual
 from instruction_duplication.types import Question
 

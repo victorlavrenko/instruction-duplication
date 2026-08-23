@@ -620,6 +620,7 @@ async def test_generation_fills_per_model_concurrency_without_head_of_line_block
     assert summary["completed"] == 16
     assert tracker.maximum == 4
 
+
 class BlankNetworkErrorThenSuccessClient:
     """Simulate the empty-message transport failures observed in the 100-question run."""
 
@@ -648,9 +649,7 @@ async def test_blank_message_network_outage_is_persisted_and_retried_without_cra
     monkeypatch, tmp_path: Path, question
 ):
     model = MODEL_BY_ID["gemma-3-12b"]
-    route = Route(
-        "openrouter", "DeepInfra", model.openrouter_id, 0.05, 0.15, 8, "test", True
-    )
+    route = Route("openrouter", "DeepInfra", model.openrouter_id, 0.05, 0.15, 8, "test", True)
     raw = fake_response(
         GenerationCell(
             cell_id="d" * 64,

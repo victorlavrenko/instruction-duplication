@@ -3,7 +3,6 @@ from __future__ import annotations
 from instruction_duplication.protocol import SECTION_GUIDANCE
 from instruction_duplication.trajectory import recover_protocol
 
-
 CHOICES = {
     "A": "Conservative management",
     "B": "Controlled delivery",

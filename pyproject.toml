@@ -95,6 +95,8 @@ max-complexity = 18
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*.py" = ["B018"]
+"src/instruction_duplication/judge.py" = ["C901"]
+"src/instruction_duplication/trajectory.py" = ["C901"]
 
 [tool.ruff.format]
 quote-style = "double"

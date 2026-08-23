@@ -4,7 +4,6 @@ import pytest
 
 from instruction_duplication.trajectory import recover_protocol
 
-
 CHOICES = {"A": "Alpha answer", "B": "Beta answer"}
 
 

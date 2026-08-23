@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 import re
 import shutil
 import subprocess
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -40,20 +38,24 @@ def test_exact_inference_round_trip() -> None:
 def test_blinded_html_has_one_click_decision_and_valid_js(tmp_path: Path) -> None:
     tool = load_tool()
     html = tool.render_html(
-        [{
-            "task_id": "t1",
-            "question": "Example question",
-            "choices": {"A": "Alpha", "B": "Beta"},
-            "criteria": [{
-                "role": "facts",
-                "title": "Facts",
-                "rule": "PASS if a concrete fact is stated.",
-                "good": "Age 65.",
-                "bad": "Many causes exist.",
-                "response_a": "Age 65.",
-                "response_b": "General discussion.",
-            }],
-        }],
+        [
+            {
+                "task_id": "t1",
+                "question": "Example question",
+                "choices": {"A": "Alpha", "B": "Beta"},
+                "criteria": [
+                    {
+                        "role": "facts",
+                        "title": "Facts",
+                        "rule": "PASS if a concrete fact is stated.",
+                        "good": "Age 65.",
+                        "bad": "Many causes exist.",
+                        "response_a": "Age 65.",
+                        "response_b": "General discussion.",
+                    }
+                ],
+            }
+        ],
         "audit-test",
     )
     assert "LEFT / A [1]" in html
@@ -69,27 +71,30 @@ def test_blinded_html_has_one_click_decision_and_valid_js(tmp_path: Path) -> Non
         subprocess.run([node, "--check", str(js)], check=True, capture_output=True, text=True)
 
 
-
 def test_highlight_ui_is_recorded_and_js_valid(tmp_path: Path) -> None:
     tool = load_tool()
     html = tool.render_html(
-        [{
-            "task_id": "t1",
-            "question": "Patient drinks whiskey nightly.",
-            "choices": {"A": "Alpha", "B": "Beta"},
-            "criteria": [{
-                "role": "facts",
-                "title": "Facts",
-                "rule": "PASS if concrete case facts are stated.",
-                "good": "whiskey nightly",
-                "bad": "many causes exist",
-                "response_a": "Facts: whiskey nightly.",
-                "response_b": "Facts: many causes exist.",
-                "source_coverage_a_html": '<mark class="lex" style="--mark-alpha:.5">whiskey</mark>',
-                "source_coverage_b_html": 'whiskey',
-                "source_coverage_note": "Visual aid only.",
-            }],
-        }],
+        [
+            {
+                "task_id": "t1",
+                "question": "Patient drinks whiskey nightly.",
+                "choices": {"A": "Alpha", "B": "Beta"},
+                "criteria": [
+                    {
+                        "role": "facts",
+                        "title": "Facts",
+                        "rule": "PASS if concrete case facts are stated.",
+                        "good": "whiskey nightly",
+                        "bad": "many causes exist",
+                        "response_a": "Facts: whiskey nightly.",
+                        "response_b": "Facts: many causes exist.",
+                        "source_coverage_a_html": '<mark class="lex" style="--mark-alpha:.5">whiskey</mark>',
+                        "source_coverage_b_html": "whiskey",
+                        "source_coverage_note": "Visual aid only.",
+                    }
+                ],
+            }
+        ],
         "audit-test",
     )
     assert "Case terms preserved by LEFT / A" in html

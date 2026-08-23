@@ -9,12 +9,12 @@ import argparse
 import shutil
 from pathlib import Path
 
-OLD_ENTRY = '''    "answer_changing_change": (
+OLD_ENTRY = """    "answer_changing_change": (
         r"answer[ _-]+changing[ _-]+change|what[ _-]+would[ _-]+change[ _-]+the[ _-]+answer|"
         r"answer[ _-]+change|counterfactual[ _-]+change"
-    ),'''
+    ),"""
 
-NEW_ENTRY = r'''    "answer_changing_change": (
+NEW_ENTRY = r"""    "answer_changing_change": (
         # Conservative unnumbered synonyms. These all explicitly describe an
         # answer-changing/counterfactual role; vague "what would change?" is handled
         # only by the numbered Step-6 fallback below.
@@ -52,9 +52,9 @@ NEW_ENTRY = r'''    "answer_changing_change": (
         r"(?:best[ _-]+alternative|second[ _-]+best(?:[ _-]+answer)?|alternative|"
         r"(?:(?:option|choice)[ _-]+)?[A-Z])"
         r"[ _-]+(?:win|be[ _-]+correct|become[ _-]+best)"
-    ),'''
+    ),"""
 
-PATTERN_BLOCK_ANCHOR = '''SEMANTIC_HEADING_PATTERNS = {
+PATTERN_BLOCK_ANCHOR = """SEMANTIC_HEADING_PATTERNS = {
     tag: re.compile(
         rf"(?im)^[ \\t]*(?:\\#{{1,6}}[ \\t]*)?(?:[-+*][ \\t]+)?"
         rf"(?:\\*\\*|__)?"
@@ -64,9 +64,9 @@ PATTERN_BLOCK_ANCHOR = '''SEMANTIC_HEADING_PATTERNS = {
     )
     for index, tag in enumerate(CONTENT_TAGS, start=1)
 }
-'''
+"""
 
-FALLBACK_BLOCK = r'''
+FALLBACK_BLOCK = r"""
 # Some models preserve the requested role number while paraphrasing its title.
 # Because explicit "6." / "Step 6" is itself a strong boundary signal, this
 # fallback may safely accept a somewhat wider family than the unnumbered aliases.
@@ -86,13 +86,13 @@ STEP6_NUMBERED_HEADING_FALLBACK_RE = re.compile(
     r")"
     r"(?:\?)?(?:\*\*|__)?[ \t]*(?:[:\u2014\u2013-][ \t]*|(?=\r?$))"
 )
-'''
+"""
 
-OLD_MATCHES = '''        headings = tuple(SEMANTIC_HEADING_PATTERNS[tag].finditer(document))
+OLD_MATCHES = """        headings = tuple(SEMANTIC_HEADING_PATTERNS[tag].finditer(document))
         combined = sorted((*exact[tag], *headings), key=lambda match: match.start())
-'''
+"""
 
-NEW_MATCHES = '''        headings = tuple(SEMANTIC_HEADING_PATTERNS[tag].finditer(document))
+NEW_MATCHES = """        headings = tuple(SEMANTIC_HEADING_PATTERNS[tag].finditer(document))
         if tag == "answer_changing_change":
             # Merge the broader numbered fallback without double-counting a line
             # already recognized by the ordinary semantic-heading pattern.
@@ -107,7 +107,7 @@ NEW_MATCHES = '''        headings = tuple(SEMANTIC_HEADING_PATTERNS[tag].findite
                 )
             )
         combined = sorted((*exact[tag], *headings), key=lambda match: match.start())
-'''
+"""
 
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
@@ -192,7 +192,9 @@ def main() -> int:
             )
 
     print("applied 3.0.12 Step-6 heading-recognition refinement")
-    print("non-trivial-content rule, semantic counterfactual diagnostic, prompts, and generation are unchanged")
+    print(
+        "non-trivial-content rule, semantic counterfactual diagnostic, prompts, and generation are unchanged"
+    )
     print("existing generations need rejudging/reanalysis only; no regeneration is required")
     return 0
 

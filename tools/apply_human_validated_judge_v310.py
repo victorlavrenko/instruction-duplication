@@ -23,7 +23,7 @@ def git_blob_sha1(data: bytes) -> str:
     return hashlib.sha1(header + data).hexdigest()
 
 
-REWRITE_BLOCK = r'''COUNTERFACTUAL_TASK_REWRITE_RE = re.compile(
+REWRITE_BLOCK = r"""COUNTERFACTUAL_TASK_REWRITE_RE = re.compile(
     # Explicitly changing what the item asks is not a change to the patient's case.
     r"\b(?:rephras(?:e|ed|ing)|rewrit(?:e|ten|ing)|chang(?:e|ed|ing)|modif(?:y|ied|ying))\b"
     r"[^.;\n]{0,60}\b(?:stem|question)\b[^.;\n]{0,80}\b(?:ask|focus|word|phrasing|intent)\b"
@@ -51,7 +51,7 @@ REWRITE_BLOCK = r'''COUNTERFACTUAL_TASK_REWRITE_RE = re.compile(
     r"was\s+(?:changed|rewritten|rephrased))\b",
     re.IGNORECASE,
 )
-'''
+"""
 
 COUNTERFACTUAL_REPLACEMENT = r'''HUMAN_VALIDATED_COUNTERFACTUAL_JUDGE = "v1"
 
@@ -306,7 +306,9 @@ def main() -> int:
         pkg = pkg_info_path.read_text(encoding="utf-8")
         if "Version: 3.0.9" in pkg:
             shutil.copy2(pkg_info_path, pkg_info_path.with_suffix(".v309.bak"))
-            pkg_info_path.write_text(pkg.replace("Version: 3.0.9", "Version: 3.0.10", 1), encoding="utf-8")
+            pkg_info_path.write_text(
+                pkg.replace("Version: 3.0.9", "Version: 3.0.10", 1), encoding="utf-8"
+            )
 
     print("applied human-validated counterfactual judge; package version is now 3.0.10")
     print("generation code and prompts were not changed; existing generations can be rejudged")

@@ -7,12 +7,12 @@ import argparse
 import shutil
 from pathlib import Path
 
-SCORE_OLD = '    body = _local_semantic_body(document, semantic_matches, match)\n    body_tokens = len(normalize_text(body).split())\n'
-SCORE_NEW = '    body = _strip_guidance_echo(\n        tag,\n        _local_semantic_body(document, semantic_matches, match),\n    )\n    body_tokens = len(normalize_text(body).split())\n'
+SCORE_OLD = "    body = _local_semantic_body(document, semantic_matches, match)\n    body_tokens = len(normalize_text(body).split())\n"
+SCORE_NEW = "    body = _strip_guidance_echo(\n        tag,\n        _local_semantic_body(document, semantic_matches, match),\n    )\n    body_tokens = len(normalize_text(body).split())\n"
 SEGMENT_OLD = 'def _selected_segment_end(\n    document: str,\n    selected: Mapping[str, re.Match[str]],\n    start: re.Match[str],\n) -> int:\n    """End a recovered section at the next boundary in the selected trajectory."""\n    later = [match.start() for match in selected.values() if match.start() > start.start()]\n    return min(later) if later else len(document)\n'
 SEGMENT_NEW = 'def _selected_segment_end(\n    document: str,\n    selected: Mapping[str, re.Match[str]],\n    semantic_matches: Mapping[str, tuple[re.Match[str], ...]],\n    tag: str,\n    start: re.Match[str],\n) -> int:\n    """End one selected role without swallowing an abandoned duplicate scaffold.\n\n    Usually the next boundary is the next marker selected for the recovered\n    trajectory. A special case occurs when an output prints a complete empty\n    template and then fills only a suffix of it. The optimal trajectory can then\n    use an early prefix (for example Facts/Implications) and a later filled suffix\n    (Provisional answer through Final answer). In that case, ending the prefix at\n    the *later* selected marker would incorrectly absorb the intervening empty\n    template and bridge prose.\n\n    Therefore, if the immediate next role has an earlier duplicate marker between\n    this role and the selected next marker, treat that earlier marker as a boundary\n    only when it is at least as strong a presentation marker as the selected one.\n    This preserves protection against weak body-internal role phrases while making\n    genuine numbered/Markdown/XML duplicate templates segment correctly.\n    """\n    later = [match.start() for match in selected.values() if match.start() > start.start()]\n    end = min(later) if later else len(document)\n\n    try:\n        index = CONTENT_TAGS.index(tag)\n    except ValueError as exc:\n        raise AssertionError(f"unknown protocol role: {tag}") from exc\n    if index + 1 >= len(CONTENT_TAGS):\n        return end\n\n    next_tag = CONTENT_TAGS[index + 1]\n    next_selected = selected.get(next_tag)\n    if next_selected is None or next_selected.start() <= start.start():\n        return end\n\n    selected_strength = _semantic_marker_strength(document, next_selected)\n    intervening = [\n        candidate.start()\n        for candidate in semantic_matches[next_tag]\n        if (\n            start.start() < candidate.start() < next_selected.start()\n            and _semantic_marker_strength(document, candidate) >= selected_strength\n        )\n    ]\n    if intervening:\n        end = min(end, min(intervening))\n    return end\n'
-CALL_OLD = '            _selected_segment_end(document, semantic_first, start)\n            if coherent is not None\n'
-CALL_NEW = '            _selected_segment_end(\n                document,\n                semantic_first,\n                semantic_matches,\n                tag,\n                start,\n            )\n            if coherent is not None\n'
+CALL_OLD = "            _selected_segment_end(document, semantic_first, start)\n            if coherent is not None\n"
+CALL_NEW = "            _selected_segment_end(\n                document,\n                semantic_first,\n                semantic_matches,\n                tag,\n                start,\n            )\n            if coherent is not None\n"
 
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
@@ -26,9 +26,7 @@ def patch_trajectory(text: str) -> str:
     if "without swallowing an abandoned duplicate scaffold" in text:
         return text
     if "STEP6_NUMBERED_HEADING_FALLBACK_RE" not in text:
-        raise RuntimeError(
-            "trajectory.py does not contain the 3.0.12 Step-6 heading refinement"
-        )
+        raise RuntimeError("trajectory.py does not contain the 3.0.12 Step-6 heading refinement")
     text = replace_once(text, SCORE_OLD, SCORE_NEW, "guidance-clean candidate scoring")
     text = replace_once(text, SEGMENT_OLD, SEGMENT_NEW, "duplicate-scaffold segment boundary")
     text = replace_once(text, CALL_OLD, CALL_NEW, "recover_protocol selected-segment call")

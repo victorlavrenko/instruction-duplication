@@ -15,7 +15,7 @@ from .facts import FACT_INVENTORY_VERSION
 from .io_utils import read_json, read_jsonl, sha256_json
 from .json_types import object_value
 from .lexical import LEXICAL_VERSION, selected_terms_hash
-from .manifest import ANALYSIS_VERSION, JUDGE_VERSION, ExperimentManifest
+from .manifest import ExperimentManifest
 from .models import SMOKE_PROFILE_ID
 from .protocol import CONDITIONS, PROTOCOL_HASH
 from .schedule import SCHEDULE_VERSION
@@ -30,8 +30,7 @@ TRANSPORT_COMPATIBLE_PACKAGE_SERIES = (
 def _package_versions_generation_compatible(stored: str, current: str) -> bool:
     """Allow exact versions plus explicitly generation-compatible transport patch series."""
     return stored == current or any(
-        stored in series and current in series
-        for series in TRANSPORT_COMPATIBLE_PACKAGE_SERIES
+        stored in series and current in series for series in TRANSPORT_COMPATIBLE_PACKAGE_SERIES
     )
 
 
