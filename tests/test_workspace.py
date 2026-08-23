@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -55,6 +56,34 @@ def test_stale_lock_is_recovered(tmp_path: Path):
     with ws.lock():
         assert ws.lock_path.exists()
     assert not ws.lock_path.exists()
+
+
+def test_windows_pid_probe_reads_tasklist_csv(monkeypatch):
+    result = subprocess.CompletedProcess(
+        args=["tasklist.exe"],
+        returncode=0,
+        stdout='"python.exe","424242","Console","1","12,345 K"\n',
+        stderr="",
+    )
+    monkeypatch.setattr(
+        "instruction_duplication.workspace.subprocess.run",
+        lambda *args, **kwargs: result,
+    )
+
+    assert Workspace._windows_pid_alive(424242)
+    assert not Workspace._windows_pid_alive(424243)
+
+
+def test_windows_pid_probe_preserves_lock_when_tasklist_fails(monkeypatch):
+    result = subprocess.CompletedProcess(
+        args=["tasklist.exe"], returncode=1, stdout="", stderr="access denied"
+    )
+    monkeypatch.setattr(
+        "instruction_duplication.workspace.subprocess.run",
+        lambda *args, **kwargs: result,
+    )
+
+    assert Workspace._windows_pid_alive(424242)
 
 
 def test_manifest_detects_package_version_change(tmp_path: Path, local_jsonl: Path):

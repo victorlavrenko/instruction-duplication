@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import csv
 import os
+import subprocess
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -358,9 +360,37 @@ class Workspace:
         return manifest
 
     @staticmethod
+    def _windows_pid_alive(pid: int) -> bool:
+        """Check a PID without using ``os.kill(pid, 0)`` on Windows."""
+        if pid == os.getpid():
+            return True
+        try:
+            result = subprocess.run(
+                ["tasklist.exe", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                check=False,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=5.0,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            # If Windows cannot answer safely, preserve the lock rather than
+            # deleting one that may belong to a live process.
+            return True
+        if result.returncode != 0:
+            return True
+        expected_pid = str(pid)
+        return any(
+            len(row) >= 2 and row[1].strip() == expected_pid
+            for row in csv.reader(result.stdout.splitlines())
+        )
+
+    @staticmethod
     def _pid_alive(pid: int) -> bool:
         if pid <= 0:
             return False
+        if os.name == "nt":
+            return Workspace._windows_pid_alive(pid)
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
