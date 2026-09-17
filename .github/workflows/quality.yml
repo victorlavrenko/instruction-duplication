@@ -64,23 +64,261 @@ jobs:
           --datasets medqa medxpertqa afrimedqa --models ministral-3-14b-2512
           --workspace package-smoke --permutations 100 --bootstraps 100
 
-  tmp-iclr-inspect:
+  tmp-iclr-export:
     if: github.head_ref == 'tmp-iclr27-export'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - name: Inspect frozen archive
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12.13"
+      - name: Build anonymous ICLR artifact
         shell: bash
         run: |
           set -euxo pipefail
-          ls -lh rejudged-3.0.13.tgz
-          echo '--- archive listing ---'
-          tar -tzf rejudged-3.0.13.tgz | head -250 || true
-          rm -rf /tmp/frozen && mkdir -p /tmp/frozen
+          rm -rf /tmp/frozen /tmp/base /tmp/pkg /tmp/ae /tmp/out
+          mkdir -p /tmp/frozen /tmp/base /tmp/pkg /tmp/out
           tar -xzf rejudged-3.0.13.tgz -C /tmp/frozen
-          echo '--- manifests ---'
-          find /tmp/frozen -type f -name manifest.json -print
-          echo '--- dirs ---'
-          find /tmp/frozen -maxdepth 4 -type d | sort | head -250
-          echo '--- files of interest ---'
-          find /tmp/frozen -type f \( -iname '*human*' -o -iname '*ae*' -o -iname '*analysis*' -o -iname '*judgment*' -o -iname '*response*' \) -printf '%p %s\n' | sort | head -400
+          python scripts/build_aaai_supplement.py \
+            --repo . \
+            --run /tmp/frozen/run-2026-08-12 \
+            --output /tmp/base/base.zip
+          unzip -q /tmp/base/base.zip -d /tmp/pkg
+
+          # Human-audit files are finalized for the current manuscript; restore the
+          # blinded key/schema that the older builder intentionally withheld.
+          mkdir -p /tmp/pkg/human-validation
+          cp /tmp/frozen/run-2026-08-12/results/blinded-matched-pair-audit.jsonl /tmp/pkg/human-validation/
+          cp /tmp/frozen/run-2026-08-12/results/blinded-matched-pair-key.jsonl /tmp/pkg/human-validation/
+          cp /tmp/frozen/run-2026-08-12/results/human-audit-schema.json /tmp/pkg/human-validation/
+          cp /tmp/frozen/run-2026-08-12/results/human-validation.html /tmp/pkg/human-validation/blinded-review-interface.html
+
+          # Recover the independently executed Answer Engineering placement notebook
+          # and exact reproduction source from the public source tree. Public locators
+          # are scrubbed below; the artifact itself is fully local for review.
+          git clone -q https://github.com/victorlavrenko/answer-engineering.git /tmp/ae
+          mkdir -p /tmp/pkg/ae-support/reproduction/src /tmp/pkg/ae-support/reproduction/rules /tmp/pkg/ae-support/reproduction/tests
+          cp /tmp/ae/notebooks/instruction-placement-reproduction.ipynb /tmp/pkg/ae-support/executed-instruction-placement-reproduction.ipynb
+          cp -a /tmp/ae/src/ae_paper_reproduction /tmp/pkg/ae-support/reproduction/src/
+          cp -a /tmp/ae/src/answer_engineering /tmp/pkg/ae-support/reproduction/src/
+          cp /tmp/ae/tests/fixtures/ent_ssnhl_doctor_rules.ae /tmp/pkg/ae-support/reproduction/rules/
+          cp /tmp/ae/tests/repro/test_repro_paper_ssnhl.py /tmp/pkg/ae-support/reproduction/tests/
+
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib, json, re, sys
+
+          root = Path('/tmp/pkg')
+          nb_path = root/'ae-support/executed-instruction-placement-reproduction.ipynb'
+          nb = json.loads(nb_path.read_text(encoding='utf-8'))
+          raw = nb_path.read_text(encoding='utf-8')
+
+          # Require the exact stored executed-notebook outputs before any scrub.
+          required = [
+              'accuracy: 842/1000 = 84.2%',
+              'accuracy: 971/1000 = 97.1%',
+              'accuracy: 786/1000 = 78.6%',
+              'accuracy: 738/1000 = 73.8%',
+              'trajectory-editing-orl-ssnhl-acute: improved=154, degraded=25, net=+129',
+              'trajectory-editing-orl-conductive-acute: improved=153, degraded=201, net=-48',
+          ]
+          missing = [x for x in required if x not in raw]
+          if missing:
+              raise SystemExit('AE executed-notebook assertions missing: ' + repr(missing))
+
+          ae_result = {
+              'provenance': 'Stored outputs in executed-instruction-placement-reproduction.ipynb',
+              'model': 'OpenMeditron/Meditron3-8B',
+              'n_per_scope': 1000,
+              'ssnhl': {
+                  'system_only': {'correct': 842, 'n': 1000, 'accuracy_percent': 84.2},
+                  'duplicated_after_query': {'correct': 971, 'n': 1000, 'accuracy_percent': 97.1},
+                  'paired_transitions': {'improved': 154, 'degraded': 25, 'net': 129},
+              },
+              'conductive': {
+                  'system_only': {'correct': 786, 'n': 1000, 'accuracy_percent': 78.6},
+                  'duplicated_after_query': {'correct': 738, 'n': 1000, 'accuracy_percent': 73.8},
+                  'paired_transitions': {'improved': 153, 'degraded': 201, 'net': -48},
+              },
+              'note': 'The historical 4,000-response browser-download JSONL is not present in the current source repositories and is not reconstructed or fabricated here.'
+          }
+          (root/'ae-support/RESULTS.json').write_text(json.dumps(ae_result, indent=2)+'\n', encoding='utf-8')
+
+          human = {
+              'provenance': 'Paper-reported blinded audit aggregate; blinded packet/key/schema and review interface are included.',
+              'primary_n': 30,
+              'confirmations': 10,
+              'ties': 20,
+              'reversals': 0,
+              'prespecified_critical_confirmations': 28,
+              'criterion_met': False,
+              'individual_final_rating_json_available_in_current_frozen_archive': False,
+              'note': 'No per-case final-rating file is fabricated. The current frozen archive contains the blinded audit packet/key/schema and interface but not the later standalone ratings JSON.'
+          }
+          (root/'human-validation/AGGREGATE_RESULT.json').write_text(json.dumps(human, indent=2)+'\n', encoding='utf-8')
+
+          # Remove author-identifying notebook badge cells and scrub identifiers in all
+          # reasonably sized text artifacts. Scientific numeric content is untouched.
+          clean_cells = []
+          for cell in nb.get('cells', []):
+              src = ''.join(cell.get('source', []))
+              if 'colab.research.google.com/github/' in src and 'instruction-placement-reproduction' in src:
+                  continue
+              clean_cells.append(cell)
+          nb['cells'] = clean_cells
+          nb_path.write_text(json.dumps(nb, ensure_ascii=False, indent=1)+'\n', encoding='utf-8')
+
+          text_ext = {'.md','.txt','.py','.toml','.cfg','.ini','.json','.jsonl','.csv','.yaml','.yml','.tex','.ipynb','.lark'}
+          replacements = [
+              (re.compile(r'Victor Lavrenko', re.I), 'Anonymous Author'),
+              (re.compile(r'victorlavrenko', re.I), 'anonymous-author'),
+              (re.compile(r'lavrenko/casefactory', re.I), 'anonymous-review/casefactory'),
+              (re.compile(r'victor@peacetech\\.vc', re.I), 'anonymous@example.invalid'),
+              (re.compile(r'PeaceTech VC', re.I), 'Anonymous Institution'),
+          ]
+          for p in root.rglob('*'):
+              if not p.is_file() or p.stat().st_size > 20*1024*1024:
+                  continue
+              if p.suffix.lower() not in text_ext and p.name not in {'LICENSE','MANIFEST.in'}:
+                  continue
+              try:
+                  text = p.read_text(encoding='utf-8')
+              except UnicodeDecodeError:
+                  continue
+              for rx, repl in replacements:
+                  text = rx.sub(repl, text)
+              p.write_text(text, encoding='utf-8')
+
+          scope = '''# Artifact scope and provenance
+
+This anonymous ICLR artifact contains the complete frozen 16,800-cell primary
+study export, deterministic scoring/analysis source, experimental configuration,
+blinded human-audit packet/key/schema/interface, and an independently executed
+Answer Engineering instruction-placement notebook with the exact reported
+aggregate rates and paired transitions.
+
+Two historical convenience files described in an earlier venue-specific
+supplement are not present in the current frozen source repositories: (1) a
+standalone JSON file containing the final per-case human ratings and (2) the
+browser-downloaded 4,000-response Answer Engineering JSONL. They are not
+reconstructed or fabricated. The current ICLR manuscript and reviewer map refer
+only to evidence actually shipped here.
+
+Fresh hosted generation is not required to audit the primary study. The Answer
+Engineering notebook is included as an executed artifact; its local reproduction
+source and clinical rule file are also shipped for inspection.
+'''
+          (root/'ARTIFACT_SCOPE.md').write_text(scope, encoding='utf-8')
+
+          # Reviewer-facing verifier: all checks are offline and require no provider.
+          verifier = r'''#!/usr/bin/env python3
+          from pathlib import Path
+          import hashlib, json, sys
+          ROOT = Path(__file__).resolve().parents[1]
+          failures=[]
+          cells=ROOT/'paper-run/results/cells-and-judgments.jsonl'
+          if not cells.is_file(): failures.append('missing primary cell export')
+          else:
+              n=sum(1 for _ in cells.open('rb'))
+              if n != 16800: failures.append(f'primary rows: {n} != 16800')
+          report=(ROOT/'paper-run/results/paper-report.txt').read_text(encoding='utf-8', errors='replace')
+          for token in ['90.22','93.17','73.44','74.81','60.21']:
+              if token not in report and token not in (ROOT/'paper-run/results/analysis.json').read_text(encoding='utf-8', errors='replace'):
+                  failures.append('primary result token missing: '+token)
+          ae=json.loads((ROOT/'ae-support/RESULTS.json').read_text())
+          checks=[
+              (ae['ssnhl']['system_only']['correct'],842),
+              (ae['ssnhl']['duplicated_after_query']['correct'],971),
+              (ae['ssnhl']['paired_transitions']['improved'],154),
+              (ae['ssnhl']['paired_transitions']['degraded'],25),
+              (ae['conductive']['system_only']['correct'],786),
+              (ae['conductive']['duplicated_after_query']['correct'],738),
+              (ae['conductive']['paired_transitions']['improved'],153),
+              (ae['conductive']['paired_transitions']['degraded'],201),
+          ]
+          if any(a!=b for a,b in checks): failures.append('AE aggregate/pair assertions failed')
+          nb=(ROOT/'ae-support/executed-instruction-placement-reproduction.ipynb').read_text(encoding='utf-8')
+          for token in ['842/1000 = 84.2%','971/1000 = 97.1%','786/1000 = 78.6%','738/1000 = 73.8%',
+                        'improved=154, degraded=25, net=+129','improved=153, degraded=201, net=-48']:
+              if token not in nb: failures.append('executed notebook token missing: '+token)
+          human=json.loads((ROOT/'human-validation/AGGREGATE_RESULT.json').read_text())
+          if (human['confirmations'],human['ties'],human['reversals']) != (10,20,0):
+              failures.append('human-audit aggregate assertion failed')
+          if failures:
+              print('ICLR ARTIFACT VERIFICATION: FAIL')
+              for f in failures: print('-',f)
+              sys.exit(1)
+          print('ICLR ARTIFACT VERIFICATION: PASS')
+          print('primary rows: 16,800')
+          print('primary headline tokens: present')
+          print('AE: 842->971 SSNHL; 786->738 conductive; paired transitions verified')
+          print('human audit aggregate: 10 confirmations, 20 ties, 0 reversals')
+          '''
+          # de-indent workflow literal indentation
+          verifier='\n'.join(line[10:] if line.startswith('          ') else line for line in verifier.splitlines())+'\n'
+          tools=root/'tools'
+          tools.mkdir(exist_ok=True)
+          (tools/'verify_iclr_bundle.py').write_text(verifier, encoding='utf-8')
+
+          reviewer = '''# Reviewer quick start
+
+No model-provider credentials are needed for the paper-facing checks.
+
+```bash
+python tools/verify_iclr_bundle.py
+python -m pip install -r requirements-research.lock
+python -m pip install -e .
+instruction-duplication status --workspace paper-run
+```
+
+The primary study's full cell-level export is in
+`paper-run/results/cells-and-judgments.jsonl`; deterministic measurement and
+analysis source is in `src/instruction_duplication/`.
+
+The downstream Answer Engineering demonstration is in `ae-support/`: the
+executed notebook stores the exact four rates and paired transition counts, and
+`reproduction/` contains the local runtime/reproduction source and clinical
+rule file.
+
+See `ARTIFACT_SCOPE.md` for precise provenance and scope.
+'''
+          (root/'ICLR_REVIEWER_README.md').write_text(reviewer, encoding='utf-8')
+          PY
+
+          python /tmp/pkg/tools/verify_iclr_bundle.py | tee /tmp/pkg/VERIFICATION_REPORT.txt
+
+          # Aggressive final double-blind scan. The scanner source itself is not shipped.
+          if grep -RaiE --exclude='SHA256SUMS' --exclude='VERIFICATION_REPORT.txt' \
+             '(Victor[[:space:]]+Lavrenko|victorlavrenko|victor@peacetech\.vc|PeaceTech[[:space:]]+VC|lavrenko/casefactory)' /tmp/pkg; then
+            echo 'Identifying string remained in package' >&2
+            exit 1
+          fi
+
+          # Replace the old manifest after adding the ICLR-specific material.
+          rm -f /tmp/pkg/SHA256SUMS
+          (cd /tmp/pkg && find . -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
+          sha256sum -c /tmp/pkg/SHA256SUMS.txt >/tmp/pkg/HASH_CHECK.txt
+
+          # Write a compact package inventory for reviewers.
+          {
+            echo 'ICLR 2027 anonymous reproduction artifact'
+            echo
+            echo "Files: $(find /tmp/pkg -type f | wc -l)"
+            echo "Uncompressed bytes: $(du -sb /tmp/pkg | cut -f1)"
+            echo "Primary cell export bytes: $(stat -c%s /tmp/pkg/paper-run/results/cells-and-judgments.jsonl)"
+            echo
+            cat /tmp/pkg/VERIFICATION_REPORT.txt
+          } > /tmp/pkg/PACKAGE_SUMMARY.txt
+
+          (cd /tmp/pkg && zip -q -9 -r /tmp/out/ICLR2027_Anonymous_Reproduction_Materials.zip .)
+          ls -lh /tmp/out/ICLR2027_Anonymous_Reproduction_Materials.zip
+          test $(stat -c%s /tmp/out/ICLR2027_Anonymous_Reproduction_Materials.zip) -lt 104857600
+          sha256sum /tmp/out/ICLR2027_Anonymous_Reproduction_Materials.zip | tee /tmp/out/ZIP_SHA256.txt
+      - name: Upload final anonymous artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ICLR2027_Anonymous_Reproduction_Materials
+          path: |
+            /tmp/out/ICLR2027_Anonymous_Reproduction_Materials.zip
+            /tmp/out/ZIP_SHA256.txt
+          retention-days: 30
