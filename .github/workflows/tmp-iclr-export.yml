@@ -3,23 +3,20 @@ on:
   push:
     branches: [tmp-iclr27-export]
 jobs:
-  inspect:
+  export:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Inspect frozen archive
-        shell: bash
-        run: |
-          set -euxo pipefail
-          echo 'ARCHIVE SIZE'
-          ls -lh rejudged-3.0.13.tgz
-          echo 'TOP LEVEL'
-          tar -tzf rejudged-3.0.13.tgz | head -200 || true
-          rm -rf /tmp/frozen && mkdir -p /tmp/frozen
-          tar -xzf rejudged-3.0.13.tgz -C /tmp/frozen
-          echo 'MANIFESTS'
-          find /tmp/frozen -type f -name manifest.json -print
-          echo 'TOP DIRS'
-          find /tmp/frozen -maxdepth 3 -type d | sort | head -200
-          echo 'FILES OF INTEREST'
-          find /tmp/frozen -type f \( -iname '*human*' -o -iname '*ae*' -o -iname '*analysis*' -o -iname '*judgment*' -o -iname '*response*' \) -printf '%p %s\n' | sort | head -300
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.13"
+      - name: Build and verify anonymous ICLR artifact
+        run: python tools/tmp_build_iclr.py
+      - name: Upload final anonymous artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ICLR2027_Anonymous_Reproduction_Materials
+          path: |
+            /tmp/out/ICLR2027_Anonymous_Reproduction_Materials.zip
+            /tmp/out/ZIP_SHA256.txt
+          retention-days: 30
