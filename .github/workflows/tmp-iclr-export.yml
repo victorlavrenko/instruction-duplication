@@ -18,6 +18,11 @@ jobs:
           p = Path('tools/tmp_build_iclr.py')
           s = p.read_text(encoding='utf-8')
           s = s.replace('    write_verifier(PKG)\n', "    (PKG / 'tools').mkdir(exist_ok=True)\n    write_verifier(PKG)\n", 1)
+          old = "for token in ['90.22','93.17','73.44','74.81','60.21']:\n    if token not in analysis and token not in report:\n        failures.append('primary result token missing: '+token)"
+          new = "for label, alts in [('90.22',('90.22','0.9022')),('93.17',('93.17','0.9317')),('73.44',('73.44','0.7344')),('74.81',('74.81','0.7481')),('60.21',('60.21','0.6021'))]:\n    if not any(token in analysis or token in report for token in alts):\n        failures.append('primary result value missing: '+label)"
+          if old not in s:
+              raise SystemExit('verifier patch target not found')
+          s = s.replace(old, new, 1)
           p.write_text(s, encoding='utf-8')
           PY
           python tools/tmp_build_iclr.py
