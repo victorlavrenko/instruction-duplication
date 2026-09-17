@@ -11,7 +11,16 @@ jobs:
         with:
           python-version: "3.12.13"
       - name: Build and verify anonymous ICLR artifact
-        run: python tools/tmp_build_iclr.py
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('tools/tmp_build_iclr.py')
+          s = p.read_text(encoding='utf-8')
+          s = s.replace('    write_verifier(PKG)\n', "    (PKG / 'tools').mkdir(exist_ok=True)\n    write_verifier(PKG)\n", 1)
+          p.write_text(s, encoding='utf-8')
+          PY
+          python tools/tmp_build_iclr.py
       - name: Upload final anonymous artifact
         uses: actions/upload-artifact@v4
         with:
