@@ -18,9 +18,7 @@ jobs:
           - {os: ubuntu-latest, python: "3.14"}
     runs-on: ${{ matrix.os }}
     steps:
-      # actions/checkout v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      # actions/setup-python v7.0.0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: ${{ matrix.python }}
@@ -65,3 +63,24 @@ jobs:
           --input-jsonl examples/questions-smoke.jsonl
           --datasets medqa medxpertqa afrimedqa --models ministral-3-14b-2512
           --workspace package-smoke --permutations 100 --bootstraps 100
+
+  tmp-iclr-inspect:
+    if: github.head_ref == 'tmp-iclr27-export'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Inspect frozen archive
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ls -lh rejudged-3.0.13.tgz
+          echo '--- archive listing ---'
+          tar -tzf rejudged-3.0.13.tgz | head -250 || true
+          rm -rf /tmp/frozen && mkdir -p /tmp/frozen
+          tar -xzf rejudged-3.0.13.tgz -C /tmp/frozen
+          echo '--- manifests ---'
+          find /tmp/frozen -type f -name manifest.json -print
+          echo '--- dirs ---'
+          find /tmp/frozen -maxdepth 4 -type d | sort | head -250
+          echo '--- files of interest ---'
+          find /tmp/frozen -type f \( -iname '*human*' -o -iname '*ae*' -o -iname '*analysis*' -o -iname '*judgment*' -o -iname '*response*' \) -printf '%p %s\n' | sort | head -400
